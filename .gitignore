@@ -3,3 +3,4 @@
 *.o.cmd
 *.o.d
 _out/
+/kernel-open/nvidia-uvm/doxygen_output
