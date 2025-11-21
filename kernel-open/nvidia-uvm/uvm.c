@@ -39,6 +39,7 @@
 #include "uvm_mem.h"
 #include "uvm_kvmalloc.h"
 #include "uvm_test_file.h"
+#include "uvm_bpf_struct_ops.h"
 
 #define NVIDIA_UVM_DEVICE_NAME          "nvidia-uvm"
 
@@ -1160,6 +1161,7 @@ static int uvm_init(void)
 {
     bool initialized_globals = false;
     bool added_device = false;
+    bool initialized_bpf_struct_ops = false;
     int ret;
 
     NV_STATUS status = uvm_global_init();
@@ -1183,12 +1185,23 @@ static int uvm_init(void)
         goto error;
     }
 
+    /* Initialize BPF struct_ops support */
+    ret = uvm_bpf_struct_ops_init();
+    if (ret != 0) {
+        UVM_ERR_PRINT("uvm_bpf_struct_ops_init() failed: %d\n", ret);
+        goto error;
+    }
+    initialized_bpf_struct_ops = true;
+
     if (uvm_enable_builtin_tests)
         UVM_INFO_PRINT("Built-in UVM tests are enabled. This is a security risk.\n");
 
     return 0;
 
 error:
+    if (initialized_bpf_struct_ops)
+        uvm_bpf_struct_ops_exit();
+
     if (added_device)
         uvm_chardev_exit();
 
@@ -1202,11 +1215,15 @@ error:
 
 static int __init uvm_init_entry(void)
 {
+   printk(KERN_INFO "NVIDIA UVM: Custom build by yunwei37 - UVM driver loading (version 575.57.08)\n");
    UVM_ENTRY_RET(uvm_init());
 }
 
 static void uvm_exit(void)
 {
+    /* Clean up BPF struct_ops support */
+    uvm_bpf_struct_ops_exit();
+
     uvm_tools_exit();
     uvm_chardev_exit();
 
