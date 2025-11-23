@@ -27,6 +27,21 @@
 /* Shared struct_ops definition between kernel module and BPF program */
 struct uvm_gpu_ext {
 	int (*uvm_bpf_test_trigger_kfunc)(const char *buf, int len);
+
+	/* Prefetch hooks */
+	int (*uvm_prefetch_before_compute)(
+		uvm_page_index_t page_index,
+		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+		uvm_va_block_region_t *max_prefetch_region,
+		uvm_va_block_region_t *result_region);
+
+	int (*uvm_prefetch_on_tree_iter)(
+		uvm_page_index_t page_index,
+		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+		uvm_va_block_region_t *max_prefetch_region,
+		uvm_va_block_region_t *current_region,
+		unsigned int counter,
+		unsigned int subregion_pages);
 };
 
 
@@ -43,9 +58,31 @@ static int uvm_gpu_ext__uvm_bpf_test_trigger_kfunc(const char *buf, int len)
 	return 0;
 }
 
+static int uvm_gpu_ext__uvm_prefetch_before_compute(
+	uvm_page_index_t page_index,
+	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+	uvm_va_block_region_t *max_prefetch_region,
+	uvm_va_block_region_t *result_region)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
+static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
+	uvm_page_index_t page_index,
+	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+	uvm_va_block_region_t *max_prefetch_region,
+	uvm_va_block_region_t *current_region,
+	unsigned int counter,
+	unsigned int subregion_pages)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
 /* CFI stubs structure */
 static struct uvm_gpu_ext __bpf_ops_uvm_gpu_ext = {
 	.uvm_bpf_test_trigger_kfunc = uvm_gpu_ext__uvm_bpf_test_trigger_kfunc,
+	.uvm_prefetch_before_compute = uvm_gpu_ext__uvm_prefetch_before_compute,
+	.uvm_prefetch_on_tree_iter = uvm_gpu_ext__uvm_prefetch_on_tree_iter,
 };
 
 /* Begin kfunc definitions */
@@ -84,12 +121,24 @@ __bpf_kfunc int bpf_uvm_strstr(const char *str, u32 str__sz, const char *substr,
 	return -1;
 }
 
+/* Set the prefetch region - allows BPF to read and modify the region */
+__bpf_kfunc void bpf_uvm_set_va_block_region(uvm_va_block_region_t *region,
+					     uvm_page_index_t first,
+					     uvm_page_index_t outer)
+{
+	if (!region)
+		return;
+	region->first = first;
+	region->outer = outer;
+}
+
 /* End kfunc definitions */
 __bpf_kfunc_end_defs();
 
 /* Define the BTF kfuncs ID set */
 BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
 BTF_ID_FLAGS(func, bpf_uvm_strstr)
+BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -247,4 +296,48 @@ void uvm_bpf_struct_ops_exit(void)
 		proc_remove(trigger_file);
 	/* Note: struct_ops unregister happens automatically on module unload */
 	pr_info("UVM: bpf_struct_ops cleaned up\n");
+}
+
+/* Wrapper functions for calling BPF hooks */
+enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
+	uvm_page_index_t page_index,
+	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+	uvm_va_block_region_t *max_prefetch_region,
+	uvm_va_block_region_t *result_region)
+{
+	struct uvm_gpu_ext *ops;
+	int ret = UVM_BPF_ACTION_DEFAULT;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_prefetch_before_compute) {
+		ret = ops->uvm_prefetch_before_compute(page_index, bitmap_tree,
+						       max_prefetch_region, result_region);
+	}
+	rcu_read_unlock();
+
+	return (enum uvm_bpf_action)ret;
+}
+
+enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
+	uvm_page_index_t page_index,
+	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
+	uvm_va_block_region_t *max_prefetch_region,
+	uvm_va_block_region_t *current_region,
+	unsigned int counter,
+	unsigned int subregion_pages)
+{
+	struct uvm_gpu_ext *ops;
+	int ret = UVM_BPF_ACTION_DEFAULT;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_prefetch_on_tree_iter) {
+		ret = ops->uvm_prefetch_on_tree_iter(page_index, bitmap_tree,
+						     max_prefetch_region, current_region,
+						     counter, subregion_pages);
+	}
+	rcu_read_unlock();
+
+	return (enum uvm_bpf_action)ret;
 }
