@@ -39,6 +39,56 @@ static struct bpf_testmod_ops __bpf_ops_bpf_testmod_ops = {
 	.test_3 = bpf_testmod_ops__test_3,
 };
 
+/* Begin kfunc definitions */
+__bpf_kfunc_start_defs();
+
+/* Define the bpf_uvm_strstr kfunc */
+__bpf_kfunc int bpf_uvm_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz)
+{
+	// Edge case: if substr is empty, return 0 (assuming empty string is found at the start)
+	if (substr__sz == 0)
+	{
+		return 0;
+	}
+	// Edge case: if the substring is longer than the main string, it's impossible to find
+	if (substr__sz > str__sz)
+	{
+		return -1; // Return -1 to indicate not found
+	}
+
+	// Iterate through the main string, considering the size limit
+	for (size_t i = 0; i <= str__sz - substr__sz; i++)
+	{
+		size_t j = 0;
+		// Compare the substring with the current position in the string
+		while (j < substr__sz && str[i + j] == substr[j])
+		{
+			j++;
+		}
+		// If the entire substring was found
+		if (j == substr__sz)
+		{
+			return i; // Return the index of the first match
+		}
+	}
+	// Return -1 if the substring is not found
+	return -1;
+}
+
+/* End kfunc definitions */
+__bpf_kfunc_end_defs();
+
+/* Define the BTF kfuncs ID set */
+BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
+BTF_ID_FLAGS(func, bpf_uvm_strstr)
+BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
+
+/* Register the kfunc ID set */
+static const struct btf_kfunc_id_set uvm_bpf_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &uvm_bpf_kfunc_ids_set,
+};
+
 /* BTF and verifier callbacks */
 static int bpf_testmod_ops_init(struct btf *btf)
 {
@@ -165,6 +215,14 @@ static const struct proc_ops trigger_proc_ops = {
 int uvm_bpf_struct_ops_init(void)
 {
 	int ret;
+
+	/* Register the kfunc ID set for struct_ops programs */
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &uvm_bpf_kfunc_set);
+	if (ret) {
+		pr_err("UVM: Failed to register BTF kfunc ID set: %d\n", ret);
+		return ret;
+	}
+	pr_info("UVM: kfunc bpf_uvm_strstr registered successfully\n");
 
 	/* Register the struct_ops */
 	ret = register_bpf_struct_ops(&bpf_testmod_ops_struct_ops, bpf_testmod_ops);
