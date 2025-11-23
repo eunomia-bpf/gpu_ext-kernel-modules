@@ -706,6 +706,53 @@ bpf_uvm_list_move_tail(uvm_gpu_chunk_t *chunk, struct list_head *head);
 __bpf_kfunc int
 bpf_uvm_list_move_head(uvm_gpu_chunk_t *chunk, struct list_head *head);
 
+/**
+ * @bpf_uvm_list_move_before - 在指定 chunk 之前插入（精确位置插入）
+ *
+ * @chunk: 要移动的 chunk
+ * @next_chunk: 参考节点（chunk 将被插入到它之前）
+ *
+ * Return: 0 成功，-EINVAL 参数错误
+ *
+ * 基于内核的 __list_add(new, prev, next)，实现精确位置插入
+ *
+ * 使用场景：
+ * - LFU 频率分段：插入到对应频率的位置
+ * - 维护有序链表
+ *
+ * 示例：
+ * ```c
+ * // 找到第一个频率 >= new_freq 的 chunk，插入到它前面
+ * uvm_gpu_chunk_t *pos = bpf_uvm_list_first(&va_block_used);
+ * for (int i = 0; i < 8 && pos; i++) {
+ *     if (get_freq(pos) >= new_freq) {
+ *         bpf_uvm_list_move_before(chunk, pos);  // O(1) 插入
+ *         break;
+ *     }
+ *     pos = bpf_uvm_list_next(pos, &va_block_used);
+ * }
+ * ```
+ */
+__bpf_kfunc int
+bpf_uvm_list_move_before(uvm_gpu_chunk_t *chunk, uvm_gpu_chunk_t *next_chunk);
+
+/**
+ * @bpf_uvm_list_move_after - 在指定 chunk 之后插入（精确位置插入）
+ *
+ * @chunk: 要移动的 chunk
+ * @prev_chunk: 参考节点（chunk 将被插入到它之后）
+ *
+ * Return: 0 成功，-EINVAL 参数错误
+ *
+ * 基于内核的 list_add(new, prev)，实现精确位置插入
+ *
+ * 使用场景：
+ * - 维护频率递增序列
+ * - 在特定位置插入新节点
+ */
+__bpf_kfunc int
+bpf_uvm_list_move_after(uvm_gpu_chunk_t *chunk, uvm_gpu_chunk_t *prev_chunk);
+
 /* ============ Chunk 属性访问（参考 cachebpf）============ */
 
 /**
@@ -833,6 +880,35 @@ bpf_uvm_list_move_head(uvm_gpu_chunk_t *chunk, struct list_head *head)
     return 0;
 }
 
+__bpf_kfunc int
+bpf_uvm_list_move_before(uvm_gpu_chunk_t *chunk, uvm_gpu_chunk_t *next_chunk)
+{
+    if (!chunk || !next_chunk)
+        return -EINVAL;
+
+    /* 先从链表中删除 chunk */
+    list_del(&chunk->list);
+
+    /* 插入到 next_chunk 之前 = 插入到 (next_chunk->prev, next_chunk) 之间 */
+    __list_add(&chunk->list, next_chunk->list.prev, &next_chunk->list);
+
+    return 0;
+}
+
+__bpf_kfunc int
+bpf_uvm_list_move_after(uvm_gpu_chunk_t *chunk, uvm_gpu_chunk_t *prev_chunk)
+{
+    if (!chunk || !prev_chunk)
+        return -EINVAL;
+
+    list_del(&chunk->list);
+
+    /* list_add 插入到 prev 之后 */
+    list_add(&chunk->list, &prev_chunk->list);
+
+    return 0;
+}
+
 /* ============ Chunk 属性访问 ============ */
 
 __bpf_kfunc u64
@@ -869,6 +945,8 @@ BTF_ID_FLAGS(func, bpf_uvm_list_last)
 BTF_ID_FLAGS(func, bpf_uvm_list_empty)
 BTF_ID_FLAGS(func, bpf_uvm_list_move_tail)
 BTF_ID_FLAGS(func, bpf_uvm_list_move_head)
+BTF_ID_FLAGS(func, bpf_uvm_list_move_before)   /* 新增：精确位置插入 */
+BTF_ID_FLAGS(func, bpf_uvm_list_move_after)    /* 新增：精确位置插入 */
 BTF_ID_FLAGS(func, bpf_uvm_chunk_get_address)
 BTF_ID_FLAGS(func, bpf_uvm_chunk_get_size)
 BTF_ID_FLAGS(func, bpf_uvm_chunk_get_state)
