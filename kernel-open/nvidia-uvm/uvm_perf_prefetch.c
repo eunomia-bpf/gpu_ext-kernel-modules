@@ -30,6 +30,7 @@
 #include "uvm_va_block.h"
 #include "uvm_va_range.h"
 #include "uvm_test.h"
+#include "uvm_bpf_struct_ops.h"
 
 //
 // Tunables for prefetch detection/prevention (configurable via module parameters)
@@ -106,17 +107,43 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     NvU16 counter;
     uvm_perf_prefetch_bitmap_tree_iter_t iter;
     uvm_va_block_region_t prefetch_region = uvm_va_block_region(0, 0);
+    enum uvm_bpf_action action;
 
-    uvm_perf_prefetch_bitmap_tree_traverse_counters(counter,
-                                                    bitmap_tree,
-                                                    page_index - max_prefetch_region.first + bitmap_tree->offset,
-                                                    &iter) {
-        uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
-        NvU16 subregion_pages = uvm_va_block_region_num_pages(subregion);
+    // Call BPF hook before computation
+    action = uvm_bpf_call_before_compute_prefetch(page_index, bitmap_tree,
+                                                   &max_prefetch_region, &prefetch_region);
 
-        UVM_ASSERT(counter <= subregion_pages);
-        if (counter * 100 > subregion_pages * g_uvm_perf_prefetch_threshold)
-            prefetch_region = subregion;
+    if (action == UVM_BPF_ACTION_BYPASS) {
+        // BPF has set the result, skip all computation
+    } else if (action == UVM_BPF_ACTION_ENTER_LOOP) {
+        // Use tree iteration with BPF callbacks
+        uvm_perf_prefetch_bitmap_tree_traverse_counters(counter,
+                                                        bitmap_tree,
+                                                        page_index - max_prefetch_region.first + bitmap_tree->offset,
+                                                        &iter) {
+            uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
+            NvU16 subregion_pages = uvm_va_block_region_num_pages(subregion);
+
+            UVM_ASSERT(counter <= subregion_pages);
+
+            // Call BPF hook on each tree iteration
+            (void)uvm_bpf_call_on_tree_iter(page_index, bitmap_tree,
+                                               &max_prefetch_region, &subregion,
+                                               counter, subregion_pages);
+        }
+    } else {
+        // UVM_BPF_ACTION_DEFAULT: use original kernel logic without BPF callbacks
+        uvm_perf_prefetch_bitmap_tree_traverse_counters(counter,
+                                                        bitmap_tree,
+                                                        page_index - max_prefetch_region.first + bitmap_tree->offset,
+                                                        &iter) {
+            uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
+            NvU16 subregion_pages = uvm_va_block_region_num_pages(subregion);
+
+            UVM_ASSERT(counter <= subregion_pages);
+            if (counter * 100 > subregion_pages * g_uvm_perf_prefetch_threshold)
+                prefetch_region = subregion;
+        }
     }
 
     // Clamp prefetch region to actual pages
