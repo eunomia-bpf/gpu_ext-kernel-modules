@@ -593,45 +593,410 @@ if (chunk) {
 
 ---
 
-## 6. BPF 中需要的 Kfunc 封装
+## 6. BPF Kfunc 封装设计（参考 cachebpf）
 
-如果要在 BPF 中操作 list，需要提供以下 kfunc:
+### 6.1 设计原则
+
+参考 cachebpf 论文和 Linux kernel BPF list 实现，NVIDIA UVM 需要提供类型安全的 kfunc 接口：
+
+**核心原则**：
+1. **类型安全**：直接返回 `uvm_gpu_chunk_t*`，避免 BPF 手动转换
+2. **边界检查**：所有遍历操作检查是否到达链表尾部
+3. **只读/修改分离**：读操作（`list_first`, `list_next`）不需要锁；修改操作需要内核持锁
+4. **高层抽象**：提供 chunk 属性访问器，避免 BPF 直接访问结构体字段
+
+### 6.2 cachebpf vs Linux BPF vs UVM 对比
+
+| 方面 | cachebpf (2025) | Linux BPF List | UVM 设计建议 |
+|------|----------------|----------------|-------------|
+| **接口风格** | 自定义 kfunc（`list_create/add/move/del/iterate`） | 通用 BPF list（`bpf_list_head`, `bpf_list_node`） | **UVM 特定 kfunc**（操作 `uvm_gpu_chunk_t`） |
+| **所有权** | Folio 所有权由内核管理 | BPF 可拥有对象（`bpf_obj_new/drop`） | **Chunk 所有权内核持有** |
+| **操作粒度** | 完整 CRUD | 完整 CRUD | **只读遍历 + 重排序** |
+| **代码复杂度** | ~750 行 kfunc | ~300 行核心代码 | **预计 ~400 行** |
+
+**UVM 选择理由**：
+- Chunk 由内核 PMM 管理，BPF 不应创建/销毁
+- BPF 只需**观察和建议**，不需完全控制
+
+### 6.3 Kfunc 完整接口定义
 
 ```c
-/* 基础操作 */
-__bpf_kfunc void bpf_list_add(struct list_head *new, struct list_head *head);
-__bpf_kfunc void bpf_list_add_tail(struct list_head *new, struct list_head *head);
-__bpf_kfunc void bpf_list_del_init(struct list_head *entry);
-__bpf_kfunc void bpf_list_move_tail(struct list_head *list, struct list_head *head);
+/**
+ * BPF Kfunc API for UVM LRU Management
+ *
+ * 提供给 BPF 程序的 GPU chunk 链表操作接口
+ */
 
-/* 查询操作 */
-__bpf_kfunc bool bpf_list_empty(const struct list_head *head);
-__bpf_kfunc bool bpf_list_is_last(const struct list_head *list,
-                                  const struct list_head *head);
+/* ============ 链表遍历操作（只读）============ */
 
-/* 获取 chunk (UVM 特定) */
-__bpf_kfunc uvm_gpu_chunk_t *bpf_list_first_chunk(struct list_head *list);
-__bpf_kfunc uvm_gpu_chunk_t *bpf_list_next_chunk(uvm_gpu_chunk_t *pos);
+/**
+ * @bpf_uvm_list_first - 获取链表第一个 chunk
+ *
+ * @head: 链表头指针（va_block_used 或 va_block_unused）
+ *
+ * Return: 第一个 chunk 或 NULL（空链表）
+ *
+ * 等价于: list_first_entry_or_null(head, uvm_gpu_chunk_t, list)
+ */
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_first(struct list_head *head);
 
-/* 遍历辅助 (类似 bpf_for_each_map_elem) */
-__bpf_kfunc long bpf_for_each_chunk(struct list_head *head,
-                                    void *callback_fn,
-                                    void *callback_ctx);
+/**
+ * @bpf_uvm_list_next - 获取下一个 chunk
+ *
+ * @chunk: 当前 chunk
+ * @head: 链表头（用于检测是否到达尾部）
+ *
+ * Return: 下一个 chunk 或 NULL（已到尾部）
+ *
+ * 等价于: list_next_entry(chunk, list)，但增加边界检查
+ */
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_next(uvm_gpu_chunk_t *chunk, struct list_head *head);
+
+/**
+ * @bpf_uvm_list_last - 获取链表最后一个 chunk
+ *
+ * @head: 链表头指针
+ *
+ * Return: 最后一个 chunk 或 NULL（空链表）
+ *
+ * 用于 MRU 策略：驱逐最近使用的 chunk
+ */
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_last(struct list_head *head);
+
+/**
+ * @bpf_uvm_list_empty - 检查链表是否为空
+ *
+ * @head: 链表头指针
+ *
+ * Return: true 为空，false 非空
+ */
+__bpf_kfunc bool
+bpf_uvm_list_empty(struct list_head *head);
+
+/* ============ 链表修改操作（需要内核持锁）============ */
+
+/**
+ * @bpf_uvm_list_move_tail - 将 chunk 移到链表尾部（MRU 位置）
+ *
+ * @chunk: 要移动的 chunk
+ * @head: 目标链表头
+ *
+ * Return: 0 成功，负值失败
+ *
+ * 用于 LRU 更新：访问后移到尾部表示"最近使用"
+ *
+ * 注意：内核必须已持有 pmm->list_lock
+ */
+__bpf_kfunc int
+bpf_uvm_list_move_tail(uvm_gpu_chunk_t *chunk, struct list_head *head);
+
+/**
+ * @bpf_uvm_list_move_head - 将 chunk 移到链表头部（LRU 位置）
+ *
+ * @chunk: 要移动的 chunk
+ * @head: 目标链表头
+ *
+ * Return: 0 成功，负值失败
+ *
+ * 用于特殊场景：标记 chunk 为"优先驱逐"
+ */
+__bpf_kfunc int
+bpf_uvm_list_move_head(uvm_gpu_chunk_t *chunk, struct list_head *head);
+
+/* ============ Chunk 属性访问（参考 cachebpf）============ */
+
+/**
+ * @bpf_uvm_chunk_get_address - 获取 chunk 的 GPU 物理地址
+ *
+ * @chunk: Chunk 指针（由 list_first/next 返回）
+ *
+ * Return: GPU 物理地址
+ *
+ * 用于：
+ * - 作为 BPF map 的 key 跟踪 chunk 元数据
+ * - 调试输出（bpf_printk）
+ */
+__bpf_kfunc u64
+bpf_uvm_chunk_get_address(uvm_gpu_chunk_t *chunk);
+
+/**
+ * @bpf_uvm_chunk_get_size - 获取 chunk 大小
+ *
+ * @chunk: Chunk 指针
+ *
+ * Return: Chunk 大小（字节）
+ *
+ * 可能值: 64KB, 128KB, 256KB, 512KB, 1MB, 2MB
+ */
+__bpf_kfunc u64
+bpf_uvm_chunk_get_size(uvm_gpu_chunk_t *chunk);
+
+/**
+ * @bpf_uvm_chunk_get_state - 获取 chunk 状态
+ *
+ * @chunk: Chunk 指针
+ *
+ * Return: Chunk 状态（UVM_PMM_GPU_CHUNK_STATE_*）
+ *
+ * 状态值:
+ * - UVM_PMM_GPU_CHUNK_STATE_ALLOCATED: 已分配给 VA block
+ * - UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED: 临时 pin（不可驱逐）
+ * - UVM_PMM_GPU_CHUNK_STATE_FREE: 空闲状态
+ */
+__bpf_kfunc int
+bpf_uvm_chunk_get_state(uvm_gpu_chunk_t *chunk);
+
+/**
+ * @bpf_uvm_chunk_is_pinned - 检查 chunk 是否被 pin
+ *
+ * @chunk: Chunk 指针
+ *
+ * Return: true 已 pin（不可驱逐），false 可驱逐
+ *
+ * 用于驱逐选择：跳过 pinned chunks
+ */
+__bpf_kfunc bool
+bpf_uvm_chunk_is_pinned(uvm_gpu_chunk_t *chunk);
 ```
 
-**使用示例**:
+### 6.4 实现示例
+
 ```c
-// BPF 程序中实现自定义 LRU
-SEC("struct_ops/on_chunk_allocated")
-int BPF_PROG(on_chunk_allocated,
-             uvm_pmm_gpu_t *pmm,
-             uvm_gpu_chunk_t *chunk,
-             uvm_va_block_t *va_block)
+/* 文件: kernel-open/nvidia-uvm/uvm_bpf_struct_ops.c */
+
+#include "uvm_pmm_gpu.h"
+#include <linux/bpf.h>
+#include <linux/btf_ids.h>
+
+/* ============ 链表遍历 ============ */
+
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_first(struct list_head *head)
 {
-    /* 通过 kfunc 移到尾部 */
-    bpf_list_move_tail(&chunk->list, &pmm->root_chunks.va_block_used);
-    return 1;
+    if (!head || list_empty(head))
+        return NULL;
+
+    return list_first_entry(head, uvm_gpu_chunk_t, list);
 }
+
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_next(uvm_gpu_chunk_t *chunk, struct list_head *head)
+{
+    if (!chunk || !head)
+        return NULL;
+
+    /* 检查是否到达尾部 */
+    if (chunk->list.next == head)
+        return NULL;
+
+    return list_next_entry(chunk, list);
+}
+
+__bpf_kfunc uvm_gpu_chunk_t *
+bpf_uvm_list_last(struct list_head *head)
+{
+    if (!head || list_empty(head))
+        return NULL;
+
+    return list_last_entry(head, uvm_gpu_chunk_t, list);
+}
+
+__bpf_kfunc bool
+bpf_uvm_list_empty(struct list_head *head)
+{
+    return !head || list_empty(head);
+}
+
+/* ============ 链表修改 ============ */
+
+__bpf_kfunc int
+bpf_uvm_list_move_tail(uvm_gpu_chunk_t *chunk, struct list_head *head)
+{
+    if (!chunk || !head)
+        return -EINVAL;
+
+    /* 假设调用者已持锁 */
+    list_move_tail(&chunk->list, head);
+    return 0;
+}
+
+__bpf_kfunc int
+bpf_uvm_list_move_head(uvm_gpu_chunk_t *chunk, struct list_head *head)
+{
+    if (!chunk || !head)
+        return -EINVAL;
+
+    list_move(&chunk->list, head);
+    return 0;
+}
+
+/* ============ Chunk 属性访问 ============ */
+
+__bpf_kfunc u64
+bpf_uvm_chunk_get_address(uvm_gpu_chunk_t *chunk)
+{
+    return chunk ? chunk->address.address : 0;
+}
+
+__bpf_kfunc u64
+bpf_uvm_chunk_get_size(uvm_gpu_chunk_t *chunk)
+{
+    return chunk ? uvm_gpu_chunk_get_size(chunk) : 0;
+}
+
+__bpf_kfunc int
+bpf_uvm_chunk_get_state(uvm_gpu_chunk_t *chunk)
+{
+    return chunk ? chunk->state : -1;
+}
+
+__bpf_kfunc bool
+bpf_uvm_chunk_is_pinned(uvm_gpu_chunk_t *chunk)
+{
+    /* 需要访问 pmm 上下文，这里简化 */
+    return chunk ? (chunk->state == UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED) : true;
+}
+
+/* ============ BTF Kfunc 注册 ============ */
+
+BTF_KFUNCS_START(uvm_lru_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_uvm_list_first)
+BTF_ID_FLAGS(func, bpf_uvm_list_next)
+BTF_ID_FLAGS(func, bpf_uvm_list_last)
+BTF_ID_FLAGS(func, bpf_uvm_list_empty)
+BTF_ID_FLAGS(func, bpf_uvm_list_move_tail)
+BTF_ID_FLAGS(func, bpf_uvm_list_move_head)
+BTF_ID_FLAGS(func, bpf_uvm_chunk_get_address)
+BTF_ID_FLAGS(func, bpf_uvm_chunk_get_size)
+BTF_ID_FLAGS(func, bpf_uvm_chunk_get_state)
+BTF_ID_FLAGS(func, bpf_uvm_chunk_is_pinned)
+BTF_KFUNCS_END(uvm_lru_kfunc_ids)
+
+static const struct btf_kfunc_id_set uvm_lru_kfunc_set = {
+    .owner = THIS_MODULE,
+    .set   = &uvm_lru_kfunc_ids,
+};
+
+int uvm_lru_kfunc_init(void)
+{
+    return register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
+                                     &uvm_lru_kfunc_set);
+}
+```
+
+### 6.5 BPF 程序使用示例
+
+```c
+/* LFU 驱逐策略使用 kfunc */
+
+#include <vmlinux.h>
+#include <bpf/bpf_helpers.h>
+
+/* 访问频率 map */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 10000);
+    __type(key, u64);
+    __type(value, u32);
+} chunk_freq SEC(".maps");
+
+/* 驱逐选择钩子 */
+SEC("struct_ops/uvm_lru_select_victim")
+int BPF_PROG(lfu_select, uvm_pmm_gpu_t *pmm,
+             struct list_head *used, struct list_head *unused,
+             uvm_gpu_chunk_t **selected)
+{
+    uvm_gpu_chunk_t *chunk, *coldest = NULL;
+    u32 min_freq = 0xFFFFFFFF;
+
+    /* 优先选择 unused chunks */
+    if (!bpf_uvm_list_empty(unused)) {
+        *selected = bpf_uvm_list_first(unused);
+        return 1;
+    }
+
+    /* 遍历 used list */
+    chunk = bpf_uvm_list_first(used);
+
+    #pragma unroll
+    for (int i = 0; i < 100 && chunk; i++) {
+        /* 跳过 pinned chunks */
+        if (bpf_uvm_chunk_is_pinned(chunk)) {
+            chunk = bpf_uvm_list_next(chunk, used);
+            continue;
+        }
+
+        /* 查询访问频率 */
+        u64 addr = bpf_uvm_chunk_get_address(chunk);
+        u32 *freq = bpf_map_lookup_elem(&chunk_freq, &addr);
+        u32 count = freq ? *freq : 0;
+
+        /* 跟踪最低频率 */
+        if (count < min_freq) {
+            min_freq = count;
+            coldest = chunk;
+        }
+
+        chunk = bpf_uvm_list_next(chunk, used);
+    }
+
+    /* 返回选择结果 */
+    if (coldest) {
+        *selected = coldest;
+        bpf_printk("LFU: Selected chunk addr=%llu, freq=%u\n",
+                   bpf_uvm_chunk_get_address(coldest), min_freq);
+        return 1;
+    }
+
+    return 0;  // 回退到默认策略
+}
+```
+
+### 6.6 与 cachebpf 和 Linux BPF 的对比
+
+| 操作 | cachebpf (2025) | Linux BPF | UVM Kfunc (本设计) |
+|------|----------------|-----------|-------------------|
+| **遍历链表** | `list_iterate(head, callback)` | `bpf_list_front/back` | `bpf_uvm_list_first/next` |
+| **修改链表** | `list_add/move/del` | `bpf_list_push_front/back` | `bpf_uvm_list_move_tail/head` |
+| **对象访问** | 直接访问 folio 字段 | `container_of` 手动转换 | **类型安全的属性访问器** |
+| **内存管理** | Folio 由内核管理 | `bpf_obj_new/drop` | **Chunk 由 PMM 管理** |
+| **迭代器** | 回调函数 | 手动循环 | **手动循环 + 边界检查** |
+
+**UVM 设计优势**：
+1. **类型安全**：直接返回 `uvm_gpu_chunk_t*`，无需 `container_of`
+2. **简单易用**：属性访问器避免 BPF 直接操作结构体
+3. **边界安全**：`list_next` 自动检测链表尾部
+
+### 6.7 使用模式总结
+
+```c
+/* 模式 1: 遍历链表选择 chunk */
+uvm_gpu_chunk_t *chunk = bpf_uvm_list_first(head);
+#pragma unroll
+for (int i = 0; i < 100 && chunk; i++) {
+    if (some_condition(chunk)) {
+        *selected = chunk;
+        return 1;
+    }
+    chunk = bpf_uvm_list_next(chunk, head);
+}
+
+/* 模式 2: 获取第一个/最后一个 */
+*selected = bpf_uvm_list_first(head);  // LRU: 最久未使用
+*selected = bpf_uvm_list_last(head);   // MRU: 最近使用
+
+/* 模式 3: 移动 chunk 到 MRU 位置 */
+bpf_uvm_list_move_tail(chunk, &pmm->root_chunks.va_block_used);
+
+/* 模式 4: 移动 chunk 到 LRU 位置（优先驱逐） */
+bpf_uvm_list_move_head(chunk, &pmm->root_chunks.va_block_used);
+
+/* 模式 5: 使用 chunk 地址作为 map key */
+u64 addr = bpf_uvm_chunk_get_address(chunk);
+bpf_map_lookup_elem(&my_map, &addr);
 ```
 
 ---
