@@ -28,6 +28,6 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
     uvm_va_block_region_t *max_prefetch_region,
     uvm_va_block_region_t *current_region,
     unsigned int counter,
-    unsigned int subregion_pages);
+    uvm_va_block_region_t *prefetch_region);
 
 #endif /* _UVM_BPF_STRUCT_OPS_H */

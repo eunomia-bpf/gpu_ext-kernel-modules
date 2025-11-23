@@ -41,7 +41,7 @@ struct uvm_gpu_ext {
 		uvm_va_block_region_t *max_prefetch_region,
 		uvm_va_block_region_t *current_region,
 		unsigned int counter,
-		unsigned int subregion_pages);
+		uvm_va_block_region_t *prefetch_region);
 };
 
 
@@ -73,7 +73,7 @@ static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
 	unsigned int counter,
-	unsigned int subregion_pages)
+	uvm_va_block_region_t *prefetch_region)
 {
 	return UVM_BPF_ACTION_DEFAULT;
 }
@@ -325,7 +325,7 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
 	unsigned int counter,
-	unsigned int subregion_pages)
+	uvm_va_block_region_t *prefetch_region)
 {
 	struct uvm_gpu_ext *ops;
 	int ret = UVM_BPF_ACTION_DEFAULT;
@@ -335,7 +335,7 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
 	if (ops && ops->uvm_prefetch_on_tree_iter) {
 		ret = ops->uvm_prefetch_on_tree_iter(page_index, bitmap_tree,
 						     max_prefetch_region, current_region,
-						     counter, subregion_pages);
+						     counter, prefetch_region);
 	}
 	rcu_read_unlock();
 
