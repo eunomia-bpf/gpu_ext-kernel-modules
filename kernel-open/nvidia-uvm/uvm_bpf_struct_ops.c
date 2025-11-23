@@ -11,32 +11,20 @@
 
 /* Define our custom struct_ops operations */
 /* Global instance that BPF programs will implement */
-static struct bpf_testmod_ops __rcu *testmod_ops;
+static struct uvm_gpu_ext __rcu *uvm_ops;
 
 /* Proc file to trigger the struct_ops */
 static struct proc_dir_entry *trigger_file;
 
 /* CFI stub functions - required for struct_ops */
-static int bpf_testmod_ops__test_1(void)
-{
-	return 0;
-}
-
-static int bpf_testmod_ops__test_2(int a, int b)
-{
-	return 0;
-}
-
-static int bpf_testmod_ops__test_3(const char *buf, int len)
+static int uvm_gpu_ext__uvm_bpf_test_trigger_kfunc(const char *buf, int len)
 {
 	return 0;
 }
 
 /* CFI stubs structure */
-static struct bpf_testmod_ops __bpf_ops_bpf_testmod_ops = {
-	.test_1 = bpf_testmod_ops__test_1,
-	.test_2 = bpf_testmod_ops__test_2,
-	.test_3 = bpf_testmod_ops__test_3,
+static struct uvm_gpu_ext __bpf_ops_uvm_gpu_ext = {
+	.uvm_bpf_test_trigger_kfunc = uvm_gpu_ext__uvm_bpf_test_trigger_kfunc,
 };
 
 /* Begin kfunc definitions */
@@ -90,13 +78,13 @@ static const struct btf_kfunc_id_set uvm_bpf_kfunc_set = {
 };
 
 /* BTF and verifier callbacks */
-static int bpf_testmod_ops_init(struct btf *btf)
+static int uvm_gpu_ext_init(struct btf *btf)
 {
 	/* Initialize BTF if needed */
 	return 0;
 }
 
-static bool bpf_testmod_ops_is_valid_access(int off, int size,
+static bool uvm_gpu_ext_is_valid_access(int off, int size,
 					    enum bpf_access_type type,
 					    const struct bpf_prog *prog,
 					    struct bpf_insn_access_aux *info)
@@ -107,19 +95,19 @@ static bool bpf_testmod_ops_is_valid_access(int off, int size,
 
 /* Allow specific BPF helpers to be used in struct_ops programs */
 static const struct bpf_func_proto *
-bpf_testmod_ops_get_func_proto(enum bpf_func_id func_id,
+uvm_gpu_ext_get_func_proto(enum bpf_func_id func_id,
 			       const struct bpf_prog *prog)
 {
 	/* Use base func proto which includes trace_printk and other basic helpers */
 	return bpf_base_func_proto(func_id, prog);
 }
 
-static const struct bpf_verifier_ops bpf_testmod_verifier_ops = {
-	.is_valid_access = bpf_testmod_ops_is_valid_access,
-	.get_func_proto = bpf_testmod_ops_get_func_proto,
+static const struct bpf_verifier_ops uvm_gpu_ext_verifier_ops = {
+	.is_valid_access = uvm_gpu_ext_is_valid_access,
+	.get_func_proto = uvm_gpu_ext_get_func_proto,
 };
 
-static int bpf_testmod_ops_init_member(const struct btf_type *t,
+static int uvm_gpu_ext_init_member(const struct btf_type *t,
 				       const struct btf_member *member,
 				       void *kdata, const void *udata)
 {
@@ -128,40 +116,40 @@ static int bpf_testmod_ops_init_member(const struct btf_type *t,
 }
 
 /* Registration function */
-static int bpf_testmod_ops_reg(void *kdata, struct bpf_link *link)
+static int uvm_gpu_ext_reg(void *kdata, struct bpf_link *link)
 {
-	struct bpf_testmod_ops *ops = kdata;
+	struct uvm_gpu_ext *ops = kdata;
 
 	/* Only one instance at a time */
-	if (cmpxchg(&testmod_ops, NULL, ops) != NULL)
+	if (cmpxchg(&uvm_ops, NULL, ops) != NULL)
 		return -EEXIST;
 
-	pr_info("bpf_testmod_ops registered in nvidia-uvm\n");
+	pr_info("uvm_gpu_ext registered in nvidia-uvm\n");
 	return 0;
 }
 
 /* Unregistration function */
-static void bpf_testmod_ops_unreg(void *kdata, struct bpf_link *link)
+static void uvm_gpu_ext_unreg(void *kdata, struct bpf_link *link)
 {
-	struct bpf_testmod_ops *ops = kdata;
+	struct uvm_gpu_ext *ops = kdata;
 
-	if (cmpxchg(&testmod_ops, ops, NULL) != ops) {
-		pr_warn("bpf_testmod_ops: unexpected unreg in nvidia-uvm\n");
+	if (cmpxchg(&uvm_ops, ops, NULL) != ops) {
+		pr_warn("uvm_gpu_ext: unexpected unreg in nvidia-uvm\n");
 		return;
 	}
 
-	pr_info("bpf_testmod_ops unregistered from nvidia-uvm\n");
+	pr_info("uvm_gpu_ext unregistered from nvidia-uvm\n");
 }
 
 /* Struct ops definition */
-static struct bpf_struct_ops bpf_testmod_ops_struct_ops = {
-	.verifier_ops = &bpf_testmod_verifier_ops,
-	.init = bpf_testmod_ops_init,
-	.init_member = bpf_testmod_ops_init_member,
-	.reg = bpf_testmod_ops_reg,
-	.unreg = bpf_testmod_ops_unreg,
-	.cfi_stubs = &__bpf_ops_bpf_testmod_ops,
-	.name = "bpf_testmod_ops",
+static struct bpf_struct_ops uvm_gpu_ext_struct_ops = {
+	.verifier_ops = &uvm_gpu_ext_verifier_ops,
+	.init = uvm_gpu_ext_init,
+	.init_member = uvm_gpu_ext_init_member,
+	.reg = uvm_gpu_ext_reg,
+	.unreg = uvm_gpu_ext_unreg,
+	.cfi_stubs = &__bpf_ops_uvm_gpu_ext,
+	.name = "uvm_gpu_ext",
 	.owner = THIS_MODULE,
 };
 
@@ -169,7 +157,7 @@ static struct bpf_struct_ops bpf_testmod_ops_struct_ops = {
 static ssize_t trigger_write(struct file *file, const char __user *buf,
 			     size_t count, loff_t *pos)
 {
-	struct bpf_testmod_ops *ops;
+	struct uvm_gpu_ext *ops;
 	char kbuf[64];
 	int ret = 0;
 
@@ -182,23 +170,13 @@ static ssize_t trigger_write(struct file *file, const char __user *buf,
 	kbuf[count] = '\0';
 
 	rcu_read_lock();
-	ops = rcu_dereference(testmod_ops);
+	ops = rcu_dereference(uvm_ops);
 	if (ops) {
 		pr_info("UVM: Calling struct_ops callbacks:\n");
 
-		if (ops->test_1) {
-			ret = ops->test_1();
-			pr_info("UVM: test_1() returned: %d\n", ret);
-		}
-
-		if (ops->test_2) {
-			ret = ops->test_2(10, 20);
-			pr_info("UVM: test_2(10, 20) returned: %d\n", ret);
-		}
-
-		if (ops->test_3) {
-			ops->test_3(kbuf, count);
-			pr_info("UVM: test_3() called with buffer\n");
+		if (ops->uvm_bpf_test_trigger_kfunc) {
+			ret = ops->uvm_bpf_test_trigger_kfunc(kbuf, count);
+			pr_info("UVM: uvm_bpf_test_trigger_kfunc() returned: %d\n", ret);
 		}
 	} else {
 		pr_info("UVM: No struct_ops registered\n");
@@ -225,7 +203,7 @@ int uvm_bpf_struct_ops_init(void)
 	pr_info("UVM: kfunc bpf_uvm_strstr registered successfully\n");
 
 	/* Register the struct_ops */
-	ret = register_bpf_struct_ops(&bpf_testmod_ops_struct_ops, bpf_testmod_ops);
+	ret = register_bpf_struct_ops(&uvm_gpu_ext_struct_ops, uvm_gpu_ext);
 	if (ret) {
 		pr_err("UVM: Failed to register struct_ops: %d\n", ret);
 		return ret;

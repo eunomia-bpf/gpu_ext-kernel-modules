@@ -16,10 +16,8 @@
 #endif
 
 /* Shared struct_ops definition between kernel module and BPF program */
-struct bpf_testmod_ops {
-	int (*test_1)(void);
-	int (*test_2)(int a, int b);
-	int (*test_3)(const char *buf, int len);
+struct uvm_gpu_ext {
+	int (*uvm_bpf_test_trigger_kfunc)(const char *buf, int len);
 };
 
 /* Function declarations for BPF struct_ops initialization */
