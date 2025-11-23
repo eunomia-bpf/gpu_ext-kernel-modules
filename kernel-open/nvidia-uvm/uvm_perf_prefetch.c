@@ -122,11 +122,10 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
                                                         page_index - max_prefetch_region.first + bitmap_tree->offset,
                                                         &iter) {
             uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
-            NvU16 subregion_pages = uvm_va_block_region_num_pages(subregion);
 
             // Call BPF hook on each tree iteration
             // BPF can modify prefetch_region via kfunc bpf_uvm_set_va_block_region(prefetch_region, ...)
-            (void)uvm_bpf_call_on_tree_iter(page_index, bitmap_tree,
+            (void)uvm_bpf_call_on_tree_iter(bitmap_tree,
                                                &max_prefetch_region, &subregion,
                                                counter, &prefetch_region);
         }

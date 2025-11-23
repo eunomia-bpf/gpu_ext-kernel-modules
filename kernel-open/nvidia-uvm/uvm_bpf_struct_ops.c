@@ -36,7 +36,6 @@ struct uvm_gpu_ext {
 		uvm_va_block_region_t *result_region);
 
 	int (*uvm_prefetch_on_tree_iter)(
-		uvm_page_index_t page_index,
 		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 		uvm_va_block_region_t *max_prefetch_region,
 		uvm_va_block_region_t *current_region,
@@ -68,7 +67,6 @@ static int uvm_gpu_ext__uvm_prefetch_before_compute(
 }
 
 static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
-	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
@@ -320,7 +318,6 @@ enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
 }
 
 enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
-	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
@@ -333,7 +330,7 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
 	if (ops && ops->uvm_prefetch_on_tree_iter) {
-		ret = ops->uvm_prefetch_on_tree_iter(page_index, bitmap_tree,
+		ret = ops->uvm_prefetch_on_tree_iter(bitmap_tree,
 						     max_prefetch_region, current_region,
 						     counter, prefetch_region);
 	}
