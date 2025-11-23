@@ -89,33 +89,7 @@ __bpf_kfunc_start_defs();
 /* Define the bpf_uvm_strstr kfunc */
 __bpf_kfunc int bpf_uvm_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz)
 {
-	// Edge case: if substr is empty, return 0 (assuming empty string is found at the start)
-	if (substr__sz == 0)
-	{
-		return 0;
-	}
-	// Edge case: if the substring is longer than the main string, it's impossible to find
-	if (substr__sz > str__sz)
-	{
-		return -1; // Return -1 to indicate not found
-	}
-
-	// Iterate through the main string, considering the size limit
-	for (size_t i = 0; i <= str__sz - substr__sz; i++)
-	{
-		size_t j = 0;
-		// Compare the substring with the current position in the string
-		while (j < substr__sz && str[i + j] == substr[j])
-		{
-			j++;
-		}
-		// If the entire substring was found
-		if (j == substr__sz)
-		{
-			return i; // Return the index of the first match
-		}
-	}
-	// Return -1 if the substring is not found
+	// For test only, not functional
 	return -1;
 }
 
