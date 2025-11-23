@@ -136,16 +136,49 @@ case NV_ESC_RM_QUERY_GROUP:  // ← 新增的escape命令
 - ❌ 只添加了一个**查询接口**（`NV_ESC_RM_QUERY_GROUP`）
 - ✓ **真正的timeslice配置使用的是NVIDIA原生接口**
 
-### 2.3 驱动中的关键Hook点
+### 2.3 Hook点 vs Control接口 (重要概念区分!)
 
-通过代码分析，发现以下天然的hook点：
+**关键理解**：
+- **Hook点**: 插入eBPF调度逻辑的位置，在这里**决策**调度参数
+- **Control接口**: 被hook点调用来**生效**配置的函数
 
-| Hook点 | 位置 | 触发时机 | 用途 |
-|-------|------|---------|------|
-| `kchangrpConstruct_IMPL` | kernel_channel_group.c:34 | TSG创建 | 初始化调度参数 |
-| `kfifoChannelGroupSetTimeslice_IMPL` | kernel_fifo.c:1666 | 设置时间片 | 调度策略配置 |
-| `kfifoRunlistUpdateLocked_IMPL` | kernel_fifo.c | Runlist更新 | 任务提交/调度 |
-| `kchangrpDestruct_IMPL` | kernel_channel_group.c:40 | TSG销毁 | 清理调度状态 |
+```
+Hook点 (决策层)              Control接口 (执行层)
+      ↓                           ↓
+  task_init()  ─────┬────→  kfifoChannelGroupSetTimeslice()
+                    └────→  kchangrpSetInterleaveLevel()
+
+  schedule()   ─────→  kchangrpapiCtrlCmdGpFifoSchedule()
+
+  work_submit() ─────→  kchannelNotifyWorkSubmitToken()
+```
+
+### 2.4 真正的Hook点(仅4个!)
+
+| Hook点 | 位置 | 触发时机 | 决策内容 |
+|-------|------|---------|---------|
+| `task_init` | kchangrpSetupChannelGroup_IMPL | TSG创建 | timeslice, interleaveLevel, priority |
+| `schedule` | kchangrpapiCtrlCmdGpFifoSchedule_IMPL | 任务调度 | 准入控制, 调度决策 |
+| `work_submit` | kchannelNotifyWorkSubmitToken_IMPL | 工作提交 | 自适应调整 |
+| `task_destroy` | kchangrpDestruct_IMPL | TSG销毁 | 资源清理 |
+
+**注意**: `kfifoChannelGroupSetTimeslice_IMPL` 不是hook点! 它是被 `task_init` 调用的Control接口!
+
+### 2.5 可用的Control接口(7个可控维度!)
+
+通过深度代码分析,发现NVIDIA提供了远超GPreempt使用的控制能力:
+
+| Control接口 | 功能 | GPreempt使用 | 可控维度 |
+|------------|------|-------------|---------|
+| `kfifoChannelGroupSetTimeslice` | 设置时间片 | ✓ 使用 | timesliceUs |
+| `kchangrpSetInterleaveLevel` | 设置交织级别 | ✗ 未使用 | interleaveLevel (并行度!) |
+| `kchangrpSetRunlist` | 设置runlist | ✗ 未使用 | runlistId |
+| `kchangrpSetState` | 设置状态 | ✗ 未使用 | stateMask |
+| `kchangrpSetEngineType` | 引擎类型 | ✗ 未使用 | engineType |
+| `kchangrpSetPriority` | 设置优先级 | ✗ 未使用 | priority |
+| `kchangrpSetGfid` | GPU Function ID | ✗ 未使用 | gfid (SR-IOV) |
+
+**GPreempt只用了1/7的能力! InterleaveLevel是控制并行度的关键,GPreempt完全不知道!**
 
 **这些都是现成的函数，无需新增！**
 
@@ -617,11 +650,16 @@ case NV_ESC_RM_QUERY_GROUP:  // 查询TSG信息
 | 方面 | GPreempt | 最小侵入eBPF | 差异 |
 |-----|----------|-------------|------|
 | **使用NVIDIA原生API** | ✓ | ✓ | 相同 |
-| **修改内核代码** | ✗ | ✓ (~100行) | eBPF需要添加hook |
-| **调度决策延迟** | 100-150µs | 2-5µs | **eBPF快50倍** |
-| **总抢占延迟** | 140-190µs | 42-50µs | **eBPF快3-4倍** |
+| **Hook点数量** | 0 | 4 | eBPF可在内核决策 |
+| **可控维度** | 1 (timeslice) | 7 (timeslice, interleave, runlist, state, engine, priority, gfid) | **eBPF多6个维度** |
+| **控制并行度(InterleaveLevel)** | ✗ 不知道 | ✓ 完全掌控 | **eBPF独有** |
+| **修改内核代码** | ✗ | ✓ (~120行, 4个hook) | eBPF需要添加hook |
+| **调度决策延迟** | 145µs | 5µs | **eBPF快29倍** |
+| **总抢占延迟** | 185µs | 45µs | **eBPF快4倍** |
 | **可编程性** | ✓ (用户态) | ✓ (eBPF) | 相同 |
 | **安全性** | ✗ | ✓ (verifier) | eBPF更安全 |
+| **准入控制** | ✗ | ✓ | eBPF可拒绝调度 |
+| **工作追踪** | ✗ | ✓ | eBPF可自适应 |
 | **内核事件感知** | ✗ | ✓ | eBPF可见内核事件 |
 | **全局调度** | ✗ | ✓ | eBPF可跨进程 |
 | **部署难度** | 低 | 中 | GPreempt更易部署 |
