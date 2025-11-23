@@ -138,7 +138,7 @@ __bpf_kfunc_end_defs();
 /* Define the BTF kfuncs ID set */
 BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
 BTF_ID_FLAGS(func, bpf_uvm_strstr)
-BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region)
+BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region, KF_TRUSTED_ARGS)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -159,8 +159,8 @@ static bool uvm_gpu_ext_is_valid_access(int off, int size,
 					    const struct bpf_prog *prog,
 					    struct bpf_insn_access_aux *info)
 {
-	/* Allow all accesses for now */
-	return true;
+	/* Use BTF-based context access to properly handle pointer types */
+	return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
 }
 
 /* Allow specific BPF helpers to be used in struct_ops programs */
