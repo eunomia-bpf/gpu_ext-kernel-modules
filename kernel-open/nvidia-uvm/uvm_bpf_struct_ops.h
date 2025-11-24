@@ -36,7 +36,7 @@ void uvm_bpf_call_pmm_chunk_activate(
     uvm_gpu_chunk_t *chunk,
     struct list_head *list);
 
-void uvm_bpf_call_pmm_chunk_populate(
+enum uvm_bpf_action uvm_bpf_call_pmm_chunk_used(
     uvm_pmm_gpu_t *pmm,
     uvm_gpu_chunk_t *chunk,
     struct list_head *list);

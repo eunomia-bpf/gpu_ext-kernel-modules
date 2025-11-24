@@ -1433,8 +1433,10 @@ static void chunk_start_eviction(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 }
 
 static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk, struct list_head *list,
-                                            void (*bpf_hook)(uvm_pmm_gpu_t *, uvm_gpu_chunk_t *, struct list_head *))
+                                            enum uvm_bpf_action (*bpf_hook)(uvm_pmm_gpu_t *, uvm_gpu_chunk_t *, struct list_head *))
 {
+    enum uvm_bpf_action action = UVM_BPF_ACTION_DEFAULT;
+
     uvm_spin_lock(&pmm->list_lock);
 
     UVM_ASSERT(uvm_gpu_chunk_get_size(chunk) == UVM_CHUNK_SIZE_MAX);
@@ -1447,12 +1449,14 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t 
         // eviction lists.
         UVM_ASSERT(!list_empty(&chunk->list));
 
-        // Kernel always moves to tail of target list first
-        list_move_tail(&chunk->list, list);
-
-        // Then call BPF hook to allow reordering within the list
+        // Call BPF hook first to allow control over list operation
         if (bpf_hook)
-            bpf_hook(pmm, chunk, list);
+            action = bpf_hook(pmm, chunk, list);
+
+        // Only move to tail if BPF doesn't bypass
+        if (action != UVM_BPF_ACTION_BYPASS) {
+            list_move_tail(&chunk->list, list);
+        }
     }
 
     uvm_spin_unlock(&pmm->list_lock);
@@ -1461,7 +1465,7 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t 
 void uvm_pmm_gpu_mark_root_chunk_used(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
     root_chunk_update_eviction_list(pmm, chunk, &pmm->root_chunks.va_block_used,
-                                    uvm_bpf_call_pmm_chunk_populate);
+                                    uvm_bpf_call_pmm_chunk_used);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_unused(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
