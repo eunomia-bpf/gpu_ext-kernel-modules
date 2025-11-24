@@ -1459,8 +1459,7 @@ void uvm_pmm_gpu_mark_root_chunk_used(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
 
 void uvm_pmm_gpu_mark_root_chunk_unused(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED,
-                                    uvm_bpf_call_pmm_chunk_depopulate);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED, NULL);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_discarded(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)

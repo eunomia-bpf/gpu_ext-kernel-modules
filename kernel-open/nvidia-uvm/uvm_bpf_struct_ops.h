@@ -41,11 +41,6 @@ void uvm_bpf_call_pmm_chunk_populate(
     uvm_gpu_chunk_t *chunk,
     struct list_head *list);
 
-void uvm_bpf_call_pmm_chunk_depopulate(
-    uvm_pmm_gpu_t *pmm,
-    uvm_gpu_chunk_t *chunk,
-    struct list_head *list);
-
 void uvm_bpf_call_pmm_eviction_prepare(
     uvm_pmm_gpu_t *pmm,
     struct list_head *va_block_used,
