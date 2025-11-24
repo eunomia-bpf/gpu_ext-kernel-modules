@@ -175,6 +175,7 @@
 #include "uvm_va_range.h"
 #include "uvm_test.h"
 #include "uvm_linux.h"
+#include "uvm_bpf_struct_ops.h"
 
 static int uvm_global_oversubscription = 1;
 module_param(uvm_global_oversubscription, int, S_IRUGO);
@@ -651,6 +652,11 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
             UVM_ASSERT(root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_IS_SPLIT ||
                        root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_ALLOCATED);
             list_move_tail(&root_chunk->chunk.list, &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
+
+            // Call BPF hook: chunk activated (became evictable)
+            uvm_bpf_call_pmm_chunk_activate(pmm,
+                                            chunk,
+                                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
         }
     }
 
@@ -1415,8 +1421,13 @@ static void chunk_start_eviction(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
     ++pmm->root_chunks.in_eviction_count;
 }
 
-static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk, uvm_pmm_alloc_list_t alloc_list)
+static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm,
+                                            uvm_gpu_chunk_t *chunk,
+                                            uvm_pmm_alloc_list_t alloc_list,
+                                            void (*bpf_hook)(uvm_pmm_gpu_t *, uvm_gpu_chunk_t *, struct list_head *))
 {
+    struct list_head *list = &pmm->root_chunks.alloc_list[alloc_list];
+
     uvm_spin_lock(&pmm->list_lock);
 
     UVM_ASSERT(uvm_gpu_chunk_get_size(chunk) == UVM_CHUNK_SIZE_MAX);
@@ -1429,7 +1440,12 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t 
         // eviction lists.
         UVM_ASSERT(!list_empty(&chunk->list));
 
-        list_move_tail(&chunk->list, &pmm->root_chunks.alloc_list[alloc_list]);
+        // Kernel always moves to tail of target list first
+        list_move_tail(&chunk->list, list);
+
+        // Then call BPF hook to allow reordering within the list
+        if (bpf_hook)
+            bpf_hook(pmm, chunk, list);
     }
 
     uvm_spin_unlock(&pmm->list_lock);
@@ -1437,17 +1453,19 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t 
 
 void uvm_pmm_gpu_mark_root_chunk_used(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_USED);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_USED,
+                                    uvm_bpf_call_pmm_chunk_populate);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_unused(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED,
+                                    uvm_bpf_call_pmm_chunk_depopulate);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_discarded(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_DISCARDED);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_DISCARDED, NULL);
 }
 
 static uvm_pmm_alloc_list_t get_alloc_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
@@ -1506,6 +1524,13 @@ static uvm_gpu_root_chunk_t *pick_root_chunk_to_evict(uvm_pmm_gpu_t *pmm)
             UVM_ASSERT(chunk->is_zero);
     }
 
+    // Call BPF hook after free list check, before unused/used list selection
+    // BPF can reorder the chunks in these lists
+    if (!chunk) {
+        uvm_bpf_call_pmm_eviction_prepare(pmm,
+                                          &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                                          &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED]);
+    }
     // TODO: Bug 1765193: Move the chunks to the tail of the used list whenever
     // they get mapped.
     if (!chunk)

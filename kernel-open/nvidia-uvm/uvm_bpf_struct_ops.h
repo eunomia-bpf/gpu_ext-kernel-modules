@@ -3,6 +3,7 @@
 
 #include "uvm_va_block_types.h"
 #include "uvm_perf_prefetch.h"
+#include "uvm_pmm_gpu.h"
 
 /* Action codes returned by BPF hooks */
 enum uvm_bpf_action {
@@ -28,5 +29,26 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
     uvm_va_block_region_t *current_region,
     unsigned int counter,
     uvm_va_block_region_t *prefetch_region);
+
+/* PMM eviction policy hook wrapper functions */
+void uvm_bpf_call_pmm_chunk_activate(
+    uvm_pmm_gpu_t *pmm,
+    uvm_gpu_chunk_t *chunk,
+    struct list_head *list);
+
+void uvm_bpf_call_pmm_chunk_populate(
+    uvm_pmm_gpu_t *pmm,
+    uvm_gpu_chunk_t *chunk,
+    struct list_head *list);
+
+void uvm_bpf_call_pmm_chunk_depopulate(
+    uvm_pmm_gpu_t *pmm,
+    uvm_gpu_chunk_t *chunk,
+    struct list_head *list);
+
+void uvm_bpf_call_pmm_eviction_prepare(
+    uvm_pmm_gpu_t *pmm,
+    struct list_head *va_block_used,
+    struct list_head *va_block_unused);
 
 #endif /* _UVM_BPF_STRUCT_OPS_H */

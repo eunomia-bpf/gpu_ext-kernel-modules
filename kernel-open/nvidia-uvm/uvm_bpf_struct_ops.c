@@ -41,6 +41,27 @@ struct uvm_gpu_ext {
 		uvm_va_block_region_t *current_region,
 		unsigned int counter,
 		uvm_va_block_region_t *prefetch_region);
+
+	/* PMM eviction policy hooks */
+	int (*uvm_pmm_chunk_activate)(
+		uvm_pmm_gpu_t *pmm,
+		uvm_gpu_chunk_t *chunk,
+		struct list_head *list);
+
+	int (*uvm_pmm_chunk_populate)(
+		uvm_pmm_gpu_t *pmm,
+		uvm_gpu_chunk_t *chunk,
+		struct list_head *list);
+
+	int (*uvm_pmm_chunk_depopulate)(
+		uvm_pmm_gpu_t *pmm,
+		uvm_gpu_chunk_t *chunk,
+		struct list_head *list);
+
+	int (*uvm_pmm_eviction_prepare)(
+		uvm_pmm_gpu_t *pmm,
+		struct list_head *va_block_used,
+		struct list_head *va_block_unused);
 };
 
 
@@ -76,11 +97,47 @@ static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
 	return UVM_BPF_ACTION_DEFAULT;
 }
 
+static int uvm_gpu_ext__uvm_pmm_chunk_activate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
+static int uvm_gpu_ext__uvm_pmm_chunk_populate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
+static int uvm_gpu_ext__uvm_pmm_chunk_depopulate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
+static int uvm_gpu_ext__uvm_pmm_eviction_prepare(
+	uvm_pmm_gpu_t *pmm,
+	struct list_head *va_block_used,
+	struct list_head *va_block_unused)
+{
+	return UVM_BPF_ACTION_DEFAULT;
+}
+
 /* CFI stubs structure */
 static struct uvm_gpu_ext __bpf_ops_uvm_gpu_ext = {
 	.uvm_bpf_test_trigger_kfunc = uvm_gpu_ext__uvm_bpf_test_trigger_kfunc,
 	.uvm_prefetch_before_compute = uvm_gpu_ext__uvm_prefetch_before_compute,
 	.uvm_prefetch_on_tree_iter = uvm_gpu_ext__uvm_prefetch_on_tree_iter,
+	.uvm_pmm_chunk_activate = uvm_gpu_ext__uvm_pmm_chunk_activate,
+	.uvm_pmm_chunk_populate = uvm_gpu_ext__uvm_pmm_chunk_populate,
+	.uvm_pmm_chunk_depopulate = uvm_gpu_ext__uvm_pmm_chunk_depopulate,
+	.uvm_pmm_eviction_prepare = uvm_gpu_ext__uvm_pmm_eviction_prepare,
 };
 
 /* Begin kfunc definitions */
@@ -104,6 +161,26 @@ __bpf_kfunc void bpf_uvm_set_va_block_region(uvm_va_block_region_t *region,
 	region->outer = outer;
 }
 
+/* Move chunk to head of the list (makes it highest priority for eviction) */
+__bpf_kfunc void bpf_uvm_pmm_chunk_move_head(uvm_gpu_chunk_t *chunk,
+					     struct list_head *list)
+{
+	if (!chunk || !list)
+		return;
+
+	list_move(&chunk->list, list);
+}
+
+/* Move chunk to tail of the list (makes it lowest priority for eviction) */
+__bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk,
+					     struct list_head *list)
+{
+	if (!chunk || !list)
+		return;
+
+	list_move_tail(&chunk->list, list);
+}
+
 /* End kfunc definitions */
 __bpf_kfunc_end_defs();
 
@@ -111,6 +188,8 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
 BTF_ID_FLAGS(func, bpf_uvm_strstr)
 BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_head, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_tail, KF_TRUSTED_ARGS)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -311,4 +390,65 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
 	rcu_read_unlock();
 
 	return (enum uvm_bpf_action)ret;
+}
+
+/* PMM eviction policy hook wrappers */
+void uvm_bpf_call_pmm_chunk_activate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	struct uvm_gpu_ext *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_pmm_chunk_activate) {
+		ops->uvm_pmm_chunk_activate(pmm, chunk, list);
+	}
+	rcu_read_unlock();
+}
+
+void uvm_bpf_call_pmm_chunk_populate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	struct uvm_gpu_ext *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_pmm_chunk_populate) {
+		ops->uvm_pmm_chunk_populate(pmm, chunk, list);
+	}
+	rcu_read_unlock();
+}
+
+void uvm_bpf_call_pmm_chunk_depopulate(
+	uvm_pmm_gpu_t *pmm,
+	uvm_gpu_chunk_t *chunk,
+	struct list_head *list)
+{
+	struct uvm_gpu_ext *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_pmm_chunk_depopulate) {
+		ops->uvm_pmm_chunk_depopulate(pmm, chunk, list);
+	}
+	rcu_read_unlock();
+}
+
+void uvm_bpf_call_pmm_eviction_prepare(
+	uvm_pmm_gpu_t *pmm,
+	struct list_head *va_block_used,
+	struct list_head *va_block_unused)
+{
+	struct uvm_gpu_ext *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(uvm_ops);
+	if (ops && ops->uvm_pmm_eviction_prepare) {
+		ops->uvm_pmm_eviction_prepare(pmm, va_block_used, va_block_unused);
+	}
+	rcu_read_unlock();
 }
