@@ -168,6 +168,10 @@ __bpf_kfunc void bpf_uvm_pmm_chunk_move_head(uvm_gpu_chunk_t *chunk,
 	if (!chunk || !list)
 		return;
 
+	/* Verify the chunk is already in a list before moving */
+	if (list_empty(&chunk->list))
+		return;
+
 	list_move(&chunk->list, list);
 }
 
@@ -176,6 +180,10 @@ __bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk,
 					     struct list_head *list)
 {
 	if (!chunk || !list)
+		return;
+
+	/* Verify the chunk is already in a list before moving */
+	if (list_empty(&chunk->list))
 		return;
 
 	list_move_tail(&chunk->list, list);

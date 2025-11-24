@@ -643,7 +643,8 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
             list_move_tail(&root_chunk->chunk.list, &pmm->root_chunks.va_block_used);
 
             // Call BPF hook: chunk activated (became evictable)
-            uvm_bpf_call_pmm_chunk_activate(pmm, chunk, &pmm->root_chunks.va_block_used);
+            // Pass root_chunk, not the sub-chunk, since we moved root_chunk->chunk.list
+            uvm_bpf_call_pmm_chunk_activate(pmm, &root_chunk->chunk, &pmm->root_chunks.va_block_used);
         }
     }
 
