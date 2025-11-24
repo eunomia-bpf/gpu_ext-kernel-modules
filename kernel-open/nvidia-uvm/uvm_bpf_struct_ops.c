@@ -321,7 +321,7 @@ int uvm_bpf_struct_ops_init(void)
 		pr_err("UVM: Failed to register BTF kfunc ID set: %d\n", ret);
 		return ret;
 	}
-	pr_info("UVM: kfunc bpf_uvm_strstr registered successfully\n");
+	pr_info("UVM: kfunc ID set registered successfully\n");
 
 	/* Register the struct_ops */
 	ret = register_bpf_struct_ops(&uvm_gpu_ext_struct_ops, uvm_gpu_ext);
