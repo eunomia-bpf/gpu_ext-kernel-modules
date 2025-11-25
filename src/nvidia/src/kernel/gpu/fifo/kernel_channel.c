@@ -51,6 +51,8 @@
 #include "gpu/timer/objtmr.h"
 #include "platform/sli/sli.h"
 
+#include "nv-gpu-sched-hooks.h"  // GPU scheduler eBPF hook functions
+
 #include "class/cl0090.h"   // KERNEL_GRAPHICS_CONTEXT
 #include "class/cl906fsw.h" // GF100_GPFIFO
 #include "class/cla06c.h"   // KEPLER_CHANNEL_GROUP_A
@@ -3977,6 +3979,21 @@ kchannelNotifyWorkSubmitToken_IMPL
 {
     NvU16 notifyStatus = 0x0;
     NvU32 index = pKernelChannel->notifyIndex[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
+
+    // eBPF hook: token_request - work submit token request (for sync)
+    // Triggered by NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN ioctl
+    {
+        KernelChannelGroup *pKernelChannelGroup =
+            (pKernelChannel->pKernelChannelGroupApi != NULL) ?
+            pKernelChannel->pKernelChannelGroupApi->pKernelChannelGroup : NULL;
+
+        struct nv_gpu_token_request_ctx ctx = {0};
+        ctx.channel_id = pKernelChannel->ChID;
+        ctx.tsg_id = (pKernelChannelGroup != NULL) ? pKernelChannelGroup->grpID : 0;
+        ctx.token = token;
+        ctx.gpu_instance = pGpu->gpuInstance;
+        nv_gpu_sched_token_request(&ctx);
+    }
 
     notifyStatus =
         FLD_SET_DRF(_CHANNELGPFIFO, _NOTIFICATION_STATUS, _IN_PROGRESS, _TRUE, notifyStatus);

@@ -1,6 +1,7 @@
 NVIDIA_SOURCES ?=
 NVIDIA_SOURCES_CXX ?=
 
+NVIDIA_SOURCES += nvidia/nv-gpu-sched-hooks.c
 NVIDIA_SOURCES += nvidia/nv-platform.c
 NVIDIA_SOURCES += nvidia/nv-dsi-parse-panel-props.c
 NVIDIA_SOURCES += nvidia/nv-bpmp.c

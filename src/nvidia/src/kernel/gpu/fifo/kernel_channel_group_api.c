@@ -46,6 +46,8 @@
 #include "rmapi/rs_utils.h"
 #include "containers/eheap_old.h"
 
+#include "nv-gpu-sched-hooks.h"  // GPU scheduler eBPF hook functions
+
 NV_STATUS
 kchangrpapiConstruct_IMPL
 (
@@ -1090,6 +1092,24 @@ kchangrpapiCtrlCmdGpFifoSchedule_IMPL
                   pResourceRef->externalClassId);
     }
     NV_ASSERT_OR_RETURN((pClass != NULL), NV_ERR_NOT_SUPPORTED);
+
+    // eBPF hook: schedule - TSG scheduling (admission control)
+    {
+        NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
+        struct nv_gpu_schedule_ctx ctx = {0};
+        ctx.tsg_id = pKernelChannelGroup->grpID;
+        ctx.runlist_id = pKernelChannelGroup->runlistId;
+        ctx.channel_count = pKernelChannelGroup->chanCount;
+        ctx.timeslice_us = pKernelChannelGroup->timesliceUs;
+        ctx.interleave_level = pKernelChannelGroup->pInterleaveLevel[subdevInst];
+        ctx.allow_schedule = 1;  // Default: allow
+        nv_gpu_sched_schedule(&ctx);
+        // Admission control: eBPF can reject scheduling
+        if (!ctx.allow_schedule)
+        {
+            return NV_ERR_BUSY_RETRY;
+        }
+    }
 
     //
     // Bug 1737765: Prevent Externally Owned Channels from running unless bound
