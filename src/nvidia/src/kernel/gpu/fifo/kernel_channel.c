@@ -3991,7 +3991,6 @@ kchannelNotifyWorkSubmitToken_IMPL
         ctx.channel_id = pKernelChannel->ChID;
         ctx.tsg_id = (pKernelChannelGroup != NULL) ? pKernelChannelGroup->grpID : 0;
         ctx.token = token;
-        ctx.gpu_instance = pGpu->gpuInstance;
         nv_gpu_sched_token_request(&ctx);
     }
 

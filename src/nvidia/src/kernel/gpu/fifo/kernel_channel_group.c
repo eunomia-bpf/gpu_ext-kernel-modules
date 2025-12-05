@@ -46,7 +46,6 @@ kchangrpDestruct_IMPL(KernelChannelGroup *pKernelChannelGroup)
     {
         struct nv_gpu_task_destroy_ctx ctx = {0};
         ctx.tsg_id = pKernelChannelGroup->grpID;
-        ctx.total_submissions = 0;  // Could track this if needed
         nv_gpu_sched_task_destroy(&ctx);
     }
     return;
@@ -193,10 +192,8 @@ kchangrpInit_IMPL
         ctx.default_timeslice = pKernelChannelGroup->timesliceUs;
         ctx.default_interleave = pKernelChannelGroup->pInterleaveLevel[subdevInst];
         ctx.runlist_id = runlistId;
-        ctx.subdev_inst = subdevInst;
         ctx.timeslice = 0;
         ctx.interleave_level = 0;
-        ctx.priority = 0;
         nv_gpu_sched_task_init(&ctx);
         // Apply eBPF decisions if any
         if (ctx.timeslice != 0)
