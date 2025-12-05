@@ -6,6 +6,12 @@
  *
  * These functions are compiled via Kbuild and can be traced with kprobe/bpftrace.
  * They serve as hook points for eBPF-based GPU scheduling decisions.
+ *
+ * This file also provides BPF struct_ops interface for GPU scheduling policy
+ * customization, allowing BPF programs to:
+ *   - Customize TSG scheduling parameters (timeslice, interleave)
+ *   - Implement admission control for GPU scheduling
+ *   - Track TSG lifecycle events
  */
 
 #ifndef _NV_GPU_SCHED_HOOKS_H_
@@ -31,8 +37,8 @@ struct nv_gpu_task_init_ctx {
     u32 interleave_level;     /* New interleave level (0 = no change) */
 };
 
-/* Hook 2: schedule context - Task scheduling */
-struct nv_gpu_schedule_ctx {
+/* Hook 2: bind context - TSG bind to hardware runlist */
+struct nv_gpu_bind_ctx {
     u64 tsg_id;               /* TSG ID */
     u32 runlist_id;           /* Runlist ID */
     u32 channel_count;        /* Number of channels in TSG */
@@ -40,7 +46,7 @@ struct nv_gpu_schedule_ctx {
     u32 interleave_level;     /* Current interleave level */
 
     /* Output field */
-    u32 allow_schedule;       /* 1 = allow, 0 = reject (NV_ERR_BUSY_RETRY) */
+    u32 allow;                /* 1 = allow, 0 = reject (NV_ERR_BUSY_RETRY) */
 };
 
 /* Hook 3: token_request context - Work submit token request (for sync) */
@@ -72,13 +78,68 @@ struct nv_gpu_task_destroy_ctx {
 /* Hook 1: Called when a TSG (Task/Channel Group) is created */
 void nv_gpu_sched_task_init(struct nv_gpu_task_init_ctx *ctx);
 
-/* Hook 2: Called when a TSG is scheduled to run */
-void nv_gpu_sched_schedule(struct nv_gpu_schedule_ctx *ctx);
+/* Hook 2: Called when a TSG is bound to hardware runlist */
+void nv_gpu_sched_bind(struct nv_gpu_bind_ctx *ctx);
 
 /* Hook 3: Called when user requests a work submit token (typically for sync) */
 void nv_gpu_sched_token_request(struct nv_gpu_token_request_ctx *ctx);
 
 /* Hook 4: Called when a TSG is destroyed */
 void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx);
+
+/*
+ * ============================================================================
+ * BPF struct_ops Interface
+ * ============================================================================
+ */
+
+/*
+ * GPU Scheduler struct_ops definition
+ *
+ * BPF programs implement these callbacks to customize GPU scheduling behavior.
+ * Each callback receives the same context structures as the kprobe hooks.
+ */
+struct nv_gpu_sched_ops {
+    /*
+     * on_task_init - Called when a TSG is created
+     *
+     * @ctx: Task init context with TSG info
+     *
+     * BPF can modify ctx->timeslice and ctx->interleave_level to customize
+     * scheduling parameters for this TSG.
+     *
+     * Return: 0 to use defaults, 1 if context was modified
+     */
+    int (*on_task_init)(struct nv_gpu_task_init_ctx *ctx);
+
+    /*
+     * on_bind - Called when a TSG is bound to hardware runlist
+     *
+     * @ctx: Bind context with TSG info
+     *
+     * BPF can set ctx->allow = 0 to reject binding.
+     * This is the admission control point.
+     *
+     * Return: 0 to allow, non-zero to reject binding
+     */
+    int (*on_bind)(struct nv_gpu_bind_ctx *ctx);
+
+    /*
+     * on_task_destroy - Called when a TSG is destroyed
+     *
+     * @ctx: Task destroy context with TSG ID
+     *
+     * BPF can use this for cleanup of any per-TSG state in BPF maps.
+     *
+     * Return: ignored
+     */
+    int (*on_task_destroy)(struct nv_gpu_task_destroy_ctx *ctx);
+};
+
+/*
+ * struct_ops initialization/cleanup functions
+ */
+int nv_gpu_sched_struct_ops_init(void);
+void nv_gpu_sched_struct_ops_exit(void);
 
 #endif /* _NV_GPU_SCHED_HOOKS_H_ */

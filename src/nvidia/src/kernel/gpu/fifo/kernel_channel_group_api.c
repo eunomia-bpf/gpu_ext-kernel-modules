@@ -1092,19 +1092,19 @@ kchangrpapiCtrlCmdGpFifoSchedule_IMPL
     }
     NV_ASSERT_OR_RETURN((pClass != NULL), NV_ERR_NOT_SUPPORTED);
 
-    // eBPF hook: schedule - TSG scheduling (admission control)
+    // eBPF hook: bind - TSG bind to hardware runlist (admission control)
     {
         NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
-        struct nv_gpu_schedule_ctx ctx = {0};
+        struct nv_gpu_bind_ctx ctx = {0};
         ctx.tsg_id = pKernelChannelGroup->grpID;
         ctx.runlist_id = pKernelChannelGroup->runlistId;
         ctx.channel_count = pKernelChannelGroup->chanCount;
         ctx.timeslice_us = pKernelChannelGroup->timesliceUs;
         ctx.interleave_level = pKernelChannelGroup->pInterleaveLevel[subdevInst];
-        ctx.allow_schedule = 1;  // Default: allow
-        nv_gpu_sched_schedule(&ctx);
-        // Admission control: eBPF can reject scheduling
-        if (!ctx.allow_schedule)
+        ctx.allow = 1;  // Default: allow
+        nv_gpu_sched_bind(&ctx);
+        // Admission control: eBPF can reject binding
+        if (!ctx.allow)
         {
             return NV_ERR_BUSY_RETRY;
         }

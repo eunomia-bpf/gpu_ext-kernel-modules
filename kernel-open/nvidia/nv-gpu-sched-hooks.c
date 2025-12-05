@@ -10,10 +10,257 @@
  *
  * The actual scheduling logic is implemented in eBPF programs that attach
  * to these kprobes and can read/modify the context structures.
+ *
+ * Additionally, struct_ops callbacks are invoked for BPF programs that
+ * implement the nv_gpu_sched_ops interface.
  */
 
 #include "nv-linux.h"
 #include "nv-gpu-sched-hooks.h"
+
+#include <linux/bpf.h>
+#include <linux/btf.h>
+#include <linux/btf_ids.h>
+#include <linux/bpf_verifier.h>
+
+/* Compatibility definitions for older kernel versions */
+#ifndef BTF_SET8_KFUNCS
+#define BTF_SET8_KFUNCS     (1 << 0)
+#endif
+
+#ifndef BTF_KFUNCS_START
+#define BTF_KFUNCS_START(name) static struct btf_id_set8 __maybe_unused name = { .flags = BTF_SET8_KFUNCS };
+#endif
+
+#ifndef BTF_KFUNCS_END
+#define BTF_KFUNCS_END(name)
+#endif
+
+/*
+ * ============================================================================
+ * BPF struct_ops Implementation
+ * ============================================================================
+ */
+
+/*
+ * Global instance that BPF programs will implement
+ * Protected by RCU for safe concurrent access
+ */
+static struct nv_gpu_sched_ops __rcu *nv_gpu_sched_bpf_ops;
+
+/*
+ * CFI stub functions - required for struct_ops
+ */
+static int nv_gpu_sched_ops__on_task_init(struct nv_gpu_task_init_ctx *ctx)
+{
+    return 0;
+}
+
+static int nv_gpu_sched_ops__on_bind(struct nv_gpu_bind_ctx *ctx)
+{
+    return 0;
+}
+
+static int nv_gpu_sched_ops__on_task_destroy(struct nv_gpu_task_destroy_ctx *ctx)
+{
+    return 0;
+}
+
+/* CFI stubs structure */
+static struct nv_gpu_sched_ops __bpf_ops_nv_gpu_sched_ops = {
+    .on_task_init = nv_gpu_sched_ops__on_task_init,
+    .on_bind = nv_gpu_sched_ops__on_bind,
+    .on_task_destroy = nv_gpu_sched_ops__on_task_destroy,
+};
+
+/*
+ * kfunc definitions - kernel functions callable from BPF
+ */
+__bpf_kfunc_start_defs();
+
+/*
+ * bpf_nv_gpu_set_timeslice - Set timeslice for a TSG
+ */
+__bpf_kfunc void bpf_nv_gpu_set_timeslice(struct nv_gpu_task_init_ctx *ctx,
+                                          u64 timeslice_us)
+{
+    if (ctx)
+        ctx->timeslice = timeslice_us;
+}
+
+/*
+ * bpf_nv_gpu_set_interleave - Set interleave level for a TSG
+ */
+__bpf_kfunc void bpf_nv_gpu_set_interleave(struct nv_gpu_task_init_ctx *ctx,
+                                           u32 interleave_level)
+{
+    if (ctx)
+        ctx->interleave_level = interleave_level;
+}
+
+/*
+ * bpf_nv_gpu_reject_bind - Reject binding for a TSG
+ */
+__bpf_kfunc void bpf_nv_gpu_reject_bind(struct nv_gpu_bind_ctx *ctx)
+{
+    if (ctx)
+        ctx->allow = 0;
+}
+
+__bpf_kfunc_end_defs();
+
+/* Define the BTF kfuncs ID set */
+BTF_KFUNCS_START(nv_gpu_sched_kfunc_ids_set)
+BTF_ID_FLAGS(func, bpf_nv_gpu_set_timeslice, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_nv_gpu_set_interleave, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_nv_gpu_reject_bind, KF_TRUSTED_ARGS)
+BTF_KFUNCS_END(nv_gpu_sched_kfunc_ids_set)
+
+/* Register the kfunc ID set */
+static const struct btf_kfunc_id_set nv_gpu_sched_kfunc_set = {
+    .owner = THIS_MODULE,
+    .set = &nv_gpu_sched_kfunc_ids_set,
+};
+
+/*
+ * BTF and verifier callbacks
+ */
+static int nv_gpu_sched_ops_init_btf(struct btf *btf)
+{
+    return 0;
+}
+
+static bool nv_gpu_sched_ops_is_valid_access(int off, int size,
+                                             enum bpf_access_type type,
+                                             const struct bpf_prog *prog,
+                                             struct bpf_insn_access_aux *info)
+{
+    return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
+}
+
+static const struct bpf_func_proto *
+nv_gpu_sched_ops_get_func_proto(enum bpf_func_id func_id,
+                                const struct bpf_prog *prog)
+{
+    return bpf_base_func_proto(func_id, prog);
+}
+
+static const struct bpf_verifier_ops nv_gpu_sched_ops_verifier_ops = {
+    .is_valid_access = nv_gpu_sched_ops_is_valid_access,
+    .get_func_proto = nv_gpu_sched_ops_get_func_proto,
+};
+
+static int nv_gpu_sched_ops_init_member(const struct btf_type *t,
+                                        const struct btf_member *member,
+                                        void *kdata, const void *udata)
+{
+    return 0;
+}
+
+/*
+ * Registration function - called when BPF program attaches
+ */
+static int nv_gpu_sched_ops_reg(void *kdata, struct bpf_link *link)
+{
+    struct nv_gpu_sched_ops *ops = kdata;
+
+    if (cmpxchg(&nv_gpu_sched_bpf_ops, NULL, ops) != NULL)
+        return -EEXIST;
+
+    pr_info("nvidia: GPU sched struct_ops registered\n");
+    return 0;
+}
+
+/*
+ * Unregistration function - called when BPF program detaches
+ */
+static void nv_gpu_sched_ops_unreg(void *kdata, struct bpf_link *link)
+{
+    struct nv_gpu_sched_ops *ops = kdata;
+
+    if (cmpxchg(&nv_gpu_sched_bpf_ops, ops, NULL) != ops)
+        pr_warn("nvidia: GPU sched struct_ops unexpected unreg\n");
+    else
+        pr_info("nvidia: GPU sched struct_ops unregistered\n");
+}
+
+/* Struct ops definition */
+static struct bpf_struct_ops nv_gpu_sched_struct_ops = {
+    .verifier_ops = &nv_gpu_sched_ops_verifier_ops,
+    .init = nv_gpu_sched_ops_init_btf,
+    .init_member = nv_gpu_sched_ops_init_member,
+    .reg = nv_gpu_sched_ops_reg,
+    .unreg = nv_gpu_sched_ops_unreg,
+    .cfi_stubs = &__bpf_ops_nv_gpu_sched_ops,
+    .name = "nv_gpu_sched_ops",
+    .owner = THIS_MODULE,
+};
+
+/*
+ * Internal wrapper functions for calling BPF hooks
+ */
+static void nv_gpu_sched_bpf_on_task_init(struct nv_gpu_task_init_ctx *ctx)
+{
+    struct nv_gpu_sched_ops *ops;
+
+    rcu_read_lock();
+    ops = rcu_dereference(nv_gpu_sched_bpf_ops);
+    if (ops && ops->on_task_init)
+        ops->on_task_init(ctx);
+    rcu_read_unlock();
+}
+
+static void nv_gpu_sched_bpf_on_bind(struct nv_gpu_bind_ctx *ctx)
+{
+    struct nv_gpu_sched_ops *ops;
+
+    rcu_read_lock();
+    ops = rcu_dereference(nv_gpu_sched_bpf_ops);
+    if (ops && ops->on_bind)
+        ops->on_bind(ctx);
+    rcu_read_unlock();
+}
+
+static void nv_gpu_sched_bpf_on_task_destroy(struct nv_gpu_task_destroy_ctx *ctx)
+{
+    struct nv_gpu_sched_ops *ops;
+
+    rcu_read_lock();
+    ops = rcu_dereference(nv_gpu_sched_bpf_ops);
+    if (ops && ops->on_task_destroy)
+        ops->on_task_destroy(ctx);
+    rcu_read_unlock();
+}
+
+/*
+ * struct_ops initialization
+ */
+int nv_gpu_sched_struct_ops_init(void)
+{
+    int ret;
+
+    ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &nv_gpu_sched_kfunc_set);
+    if (ret) {
+        pr_err("nvidia: Failed to register GPU sched kfunc ID set: %d\n", ret);
+        return ret;
+    }
+
+    ret = register_bpf_struct_ops(&nv_gpu_sched_struct_ops, nv_gpu_sched_ops);
+    if (ret) {
+        pr_err("nvidia: Failed to register GPU sched struct_ops: %d\n", ret);
+        return ret;
+    }
+
+    pr_info("nvidia: GPU sched struct_ops initialized\n");
+    return 0;
+}
+EXPORT_SYMBOL(nv_gpu_sched_struct_ops_init);
+
+void nv_gpu_sched_struct_ops_exit(void)
+{
+    pr_info("nvidia: GPU sched struct_ops cleaned up\n");
+}
+EXPORT_SYMBOL(nv_gpu_sched_struct_ops_exit);
 
 /*
  * Memory barrier to prevent compiler from reordering or eliminating
@@ -44,40 +291,45 @@ noinline void nv_gpu_sched_task_init(struct nv_gpu_task_init_ctx *ctx)
 {
     /*
      * This function body is intentionally minimal.
-     * The actual work is done by eBPF programs attached via kprobe.
+     * The actual work is done by eBPF programs attached via kprobe
+     * or struct_ops.
      *
      * The barrier ensures:
      * 1. The function is not optimized away
      * 2. The ctx pointer access is not reordered
      */
     if (ctx) {
+        /* Call struct_ops hook if registered */
+        nv_gpu_sched_bpf_on_task_init(ctx);
         NV_SCHED_HOOK_BARRIER();
     }
 }
 
 /*
- * Hook 2: nv_gpu_sched_schedule
+ * Hook 2: nv_gpu_sched_bind
  *
- * Called when a TSG is about to be scheduled (enabled for execution).
- * This is the admission control point where eBPF can:
- *   - Accept or reject the scheduling request
- *   - Implement rate limiting or quotas
- *   - Track scheduling events
+ * Called when a TSG is being bound to the hardware runlist.
+ * This is a ONE-TIME operation for admission control where eBPF can:
+ *   - Accept or reject the bind request
+ *   - Implement access control policies
+ *   - Track TSG binding events
  *
  * Called from: kchangrpapiCtrlCmdGpFifoSchedule_IMPL (kernel_channel_group_api.c)
  *
  * Example bpftrace usage:
- *   kprobe:nv_gpu_sched_schedule {
- *       $ctx = (struct nv_gpu_schedule_ctx *)arg0;
- *       printf("TSG %llu schedule: channels=%u timeslice=%llu\n",
+ *   kprobe:nv_gpu_sched_bind {
+ *       $ctx = (struct nv_gpu_bind_ctx *)arg0;
+ *       printf("TSG %llu bind: channels=%u timeslice=%llu\n",
  *              $ctx->tsg_id, $ctx->channel_count, $ctx->timeslice_us);
  *   }
  */
-noinline void nv_gpu_sched_schedule(struct nv_gpu_schedule_ctx *ctx)
+noinline void nv_gpu_sched_bind(struct nv_gpu_bind_ctx *ctx)
 {
     if (ctx) {
-        /* Default: allow scheduling */
-        ctx->allow_schedule = 1;
+        /* Default: allow binding */
+        ctx->allow = 1;
+        /* Call struct_ops hook if registered - may modify allow */
+        nv_gpu_sched_bpf_on_bind(ctx);
         NV_SCHED_HOOK_BARRIER();
     }
 }
@@ -132,6 +384,8 @@ noinline void nv_gpu_sched_token_request(struct nv_gpu_token_request_ctx *ctx)
 noinline void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx)
 {
     if (ctx) {
+        /* Call struct_ops hook if registered */
+        nv_gpu_sched_bpf_on_task_destroy(ctx);
         NV_SCHED_HOOK_BARRIER();
     }
 }
@@ -140,6 +394,6 @@ noinline void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx)
  * Export symbols so they can be called from the nvidia core (nv-kernel.o)
  */
 EXPORT_SYMBOL(nv_gpu_sched_task_init);
-EXPORT_SYMBOL(nv_gpu_sched_schedule);
+EXPORT_SYMBOL(nv_gpu_sched_bind);
 EXPORT_SYMBOL(nv_gpu_sched_token_request);
 EXPORT_SYMBOL(nv_gpu_sched_task_destroy);

@@ -55,6 +55,7 @@
 #include "nv-pat.h"
 #include "nv-dmabuf.h"
 #include "nv-caps-imex.h"
+#include "nv-gpu-sched-hooks.h"
 
 /*
  * Commit aefb2f2e619b ("x86/bugs: Rename CONFIG_RETPOLINE =>
@@ -987,6 +988,14 @@ static int __init nvidia_init_module(void)
 
     nv_report_applied_patches();
 
+    /* Initialize GPU scheduler struct_ops for BPF */
+    rc = nv_gpu_sched_struct_ops_init();
+    if (rc != 0)
+    {
+        nv_printf(NV_DBG_ERRORS, "NVRM: GPU sched struct_ops init failed: %d\n", rc);
+        /* Non-fatal, continue without struct_ops support */
+    }
+
     nv_printf(NV_DBG_ERRORS, "NVRM: loading %s\n", pNVRM_ID);
 
 #if defined(NV_UVM_ENABLE)
@@ -1060,6 +1069,9 @@ static void __exit nvidia_exit_module(void)
 #if defined(NV_UVM_ENABLE)
     nv_uvm_exit();
 #endif
+
+    /* Cleanup GPU scheduler struct_ops */
+    nv_gpu_sched_struct_ops_exit();
 
     nv_drivers_exit();
 
