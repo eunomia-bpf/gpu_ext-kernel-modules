@@ -26,10 +26,8 @@ struct nv_gpu_task_init_ctx {
     NvU64 default_timeslice;    /* Default timeslice in microseconds */
     NvU32 default_interleave;   /* Default interleave level */
     NvU32 runlist_id;           /* Runlist ID */
-    NvU32 subdev_inst;          /* Subdevice instance */
     NvU64 timeslice;            /* Output: New timeslice (0 = no change) */
     NvU32 interleave_level;     /* Output: New interleave level (0 = no change) */
-    NvU32 priority;             /* Output: Priority hint */
 };
 
 /* Hook 2: schedule context - Task scheduling */
@@ -47,13 +45,11 @@ struct nv_gpu_token_request_ctx {
     NvU32 channel_id;           /* Channel ID */
     NvU64 tsg_id;               /* TSG ID */
     NvU32 token;                /* Work submit token */
-    NvU32 gpu_instance;         /* GPU instance ID */
 };
 
 /* Hook 4: task_destroy context - TSG destruction */
 struct nv_gpu_task_destroy_ctx {
     NvU64 tsg_id;               /* TSG ID */
-    NvU64 total_submissions;    /* Total work submissions */
 };
 
 /*

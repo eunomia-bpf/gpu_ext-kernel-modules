@@ -25,12 +25,10 @@ struct nv_gpu_task_init_ctx {
     u64 default_timeslice;    /* Default timeslice in microseconds */
     u32 default_interleave;   /* Default interleave level */
     u32 runlist_id;           /* Runlist ID */
-    u32 subdev_inst;          /* Subdevice instance */
 
     /* Output fields - eBPF can modify via map lookup after hook */
     u64 timeslice;            /* New timeslice (0 = no change) */
     u32 interleave_level;     /* New interleave level (0 = no change) */
-    u32 priority;             /* Priority hint */
 };
 
 /* Hook 2: schedule context - Task scheduling */
@@ -50,13 +48,11 @@ struct nv_gpu_token_request_ctx {
     u32 channel_id;           /* Channel ID */
     u64 tsg_id;               /* TSG ID */
     u32 token;                /* Work submit token */
-    u32 gpu_instance;         /* GPU instance ID */
 };
 
 /* Hook 4: task_destroy context - TSG destruction */
 struct nv_gpu_task_destroy_ctx {
     u64 tsg_id;               /* TSG ID */
-    u64 total_submissions;    /* Total work submissions (if tracked) */
 };
 
 /*
