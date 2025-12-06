@@ -138,11 +138,50 @@ static bool nv_gpu_sched_ops_is_valid_access(int off, int size,
     return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
 }
 
+/*
+ * BPF helper: get current process comm (name)
+ * Note: bpf_get_current_comm_proto is not exported by kernel, so we implement our own.
+ */
+BPF_CALL_2(nv_bpf_get_current_comm, char *, buf, u32, size)
+{
+    struct task_struct *task = current;
+
+    if (unlikely(!task))
+        goto err_clear;
+
+    strscpy_pad(buf, task->comm, size);
+    return 0;
+err_clear:
+    memset(buf, 0, size);
+    return -EINVAL;
+}
+
+static const struct bpf_func_proto nv_bpf_get_current_comm_proto = {
+    .func       = nv_bpf_get_current_comm,
+    .gpl_only   = false,
+    .ret_type   = RET_INTEGER,
+    .arg1_type  = ARG_PTR_TO_UNINIT_MEM,
+    .arg2_type  = ARG_CONST_SIZE,
+};
+
 static const struct bpf_func_proto *
 nv_gpu_sched_ops_get_func_proto(enum bpf_func_id func_id,
                                 const struct bpf_prog *prog)
 {
-    return bpf_base_func_proto(func_id, prog);
+    const struct bpf_func_proto *proto;
+
+    /* First try base func proto */
+    proto = bpf_base_func_proto(func_id, prog);
+    if (proto)
+        return proto;
+
+    /* Add additional helpers for GPU scheduling */
+    switch (func_id) {
+    case BPF_FUNC_get_current_comm:
+        return &nv_bpf_get_current_comm_proto;
+    default:
+        return NULL;
+    }
 }
 
 static const struct bpf_verifier_ops nv_gpu_sched_ops_verifier_ops = {
