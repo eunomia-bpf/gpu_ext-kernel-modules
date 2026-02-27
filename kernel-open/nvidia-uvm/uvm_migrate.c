@@ -689,6 +689,48 @@ static NV_STATUS uvm_migrate(uvm_va_space_t *va_space,
     return status;
 }
 
+// BPF cross-block prefetch wrapper: called from deferred workqueue to migrate
+// a VA range to GPU. Acquires va_space read lock internally.
+// Caller must ensure va_space is still valid (not destroyed).
+NV_STATUS uvm_migrate_bpf(uvm_va_space_t *va_space, NvU64 base, NvU64 length)
+{
+    NV_STATUS status;
+    uvm_va_range_managed_t *first;
+    uvm_processor_mask_t *gpus_to_check;
+
+    if (!va_space || !length)
+        return NV_ERR_INVALID_ARGUMENT;
+
+    gpus_to_check = uvm_processor_mask_cache_alloc();
+    if (!gpus_to_check)
+        return NV_ERR_NO_MEMORY;
+
+    uvm_va_space_down_read(va_space);
+
+    first = uvm_va_space_iter_managed_first(va_space, base, base);
+    if (!first) {
+        uvm_va_space_up_read(va_space);
+        uvm_processor_mask_cache_free(gpus_to_check);
+        return NV_ERR_INVALID_ADDRESS;
+    }
+
+    status = uvm_migrate(va_space,
+                         NULL,                      // mm (not needed for managed ranges)
+                         base,
+                         length,
+                         uvm_gpu_id_from_index(0),  // GPU 0
+                         NUMA_NO_NODE,
+                         0,                          // migrate_flags
+                         first,
+                         NULL,                       // out_tracker (synchronous)
+                         gpus_to_check);
+
+    uvm_va_space_up_read(va_space);
+    uvm_processor_mask_cache_free(gpus_to_check);
+
+    return status;
+}
+
 static NV_STATUS semaphore_release_from_gpu(uvm_gpu_t *gpu,
                                             uvm_va_range_semaphore_pool_t *semaphore_va_range,
                                             NvU64 semaphore_user_addr,

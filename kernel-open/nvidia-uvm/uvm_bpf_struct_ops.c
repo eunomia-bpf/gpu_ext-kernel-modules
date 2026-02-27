@@ -8,7 +8,7 @@
 #include <linux/seq_file.h>
 #include <linux/bpf_verifier.h>
 #include "uvm_bpf_struct_ops.h"
-
+#include "uvm_migrate.h"
 
 /* Compatibility definitions for lower kernel versions */
 #ifndef BTF_SET8_KFUNCS
@@ -167,6 +167,21 @@ __bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk,
 	list_move_tail(&chunk->list, list);
 }
 
+/* ===== Cross-block prefetch kfunc ===== */
+
+/* Migrate a VA range to GPU — sleepable kfunc.
+ * Must be called from sleepable BPF context (e.g., bpf_wq callback).
+ * Acquires va_space read lock internally via uvm_migrate_bpf().
+ * Caller must ensure va_space_handle is valid (obtained from same process
+ * context, e.g., during active benchmark). */
+__bpf_kfunc int bpf_uvm_migrate_range(u64 va_space_handle, u64 addr, u64 length)
+{
+	uvm_va_space_t *va_space = (uvm_va_space_t *)va_space_handle;
+	if (!va_space || !length)
+		return -EINVAL;
+	return (int)uvm_migrate_bpf(va_space, addr, length);
+}
+
 /* End kfunc definitions */
 __bpf_kfunc_end_defs();
 
@@ -176,6 +191,7 @@ BTF_ID_FLAGS(func, bpf_uvm_strstr)
 BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_head, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_tail, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_uvm_migrate_range, KF_SLEEPABLE)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -318,12 +334,10 @@ int uvm_bpf_struct_ops_init(void)
 
 	/* Create proc file for triggering */
 	trigger_file = proc_create("bpf_testmod_trigger", 0222, NULL, &trigger_proc_ops);
-	if (!trigger_file) {
-		/* Note: No unregister function available in this kernel version */
+	if (!trigger_file)
 		return -ENOMEM;
-	}
 
-	pr_info("UVM: bpf_struct_ops initialized with struct_ops support\n");
+	pr_info("UVM: bpf_struct_ops initialized\n");
 	return 0;
 }
 
@@ -349,7 +363,8 @@ enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
 	ops = rcu_dereference(uvm_ops);
 	if (ops && ops->uvm_prefetch_before_compute) {
 		ret = ops->uvm_prefetch_before_compute(page_index, bitmap_tree,
-						       max_prefetch_region, result_region);
+						       max_prefetch_region,
+						       result_region);
 	}
 	rcu_read_unlock();
 
