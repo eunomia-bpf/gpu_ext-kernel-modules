@@ -654,8 +654,9 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
             list_move_tail(&root_chunk->chunk.list, &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
 
             // Call BPF hook: chunk activated (became evictable)
-            uvm_bpf_call_pmm_chunk_activate(pmm,
-                                            chunk,
+            // Pass root_chunk, not the sub-chunk, since we moved root_chunk->chunk.list
+            uvm_bpf_call_gpu_block_activate(pmm,
+                                            &root_chunk->chunk,
                                             &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
         }
     }
@@ -1459,7 +1460,7 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm,
 void uvm_pmm_gpu_mark_root_chunk_used(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
     root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_USED,
-                                    uvm_bpf_call_pmm_chunk_used);
+                                    uvm_bpf_call_gpu_block_access);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_unused(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
@@ -1531,7 +1532,7 @@ static uvm_gpu_root_chunk_t *pick_root_chunk_to_evict(uvm_pmm_gpu_t *pmm)
     // Call BPF hook after free list check, before unused/used list selection
     // BPF can reorder the chunks in these lists
     if (!chunk) {
-        uvm_bpf_call_pmm_eviction_prepare(pmm,
+        uvm_bpf_call_gpu_evict_prepare(pmm,
                                           &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
                                           &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED]);
     }

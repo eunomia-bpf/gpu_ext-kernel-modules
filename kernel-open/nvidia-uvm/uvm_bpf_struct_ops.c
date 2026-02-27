@@ -25,17 +25,17 @@
 #endif
 
 /* Shared struct_ops definition between kernel module and BPF program */
-struct uvm_gpu_ext {
-	int (*uvm_bpf_test_trigger_kfunc)(const char *buf, int len);
+struct gpu_mem_ops {
+	int (*gpu_test_trigger)(const char *buf, int len);
 
 	/* Prefetch hooks */
-	int (*uvm_prefetch_before_compute)(
+	int (*gpu_page_prefetch)(
 		uvm_page_index_t page_index,
 		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 		uvm_va_block_region_t *max_prefetch_region,
 		uvm_va_block_region_t *result_region);
 
-	int (*uvm_prefetch_on_tree_iter)(
+	int (*gpu_page_prefetch_iter)(
 		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 		uvm_va_block_region_t *max_prefetch_region,
 		uvm_va_block_region_t *current_region,
@@ -43,17 +43,17 @@ struct uvm_gpu_ext {
 		uvm_va_block_region_t *prefetch_region);
 
 	/* PMM eviction policy hooks */
-	int (*uvm_pmm_chunk_activate)(
+	int (*gpu_block_activate)(
 		uvm_pmm_gpu_t *pmm,
 		uvm_gpu_chunk_t *chunk,
 		struct list_head *list);
 
-	int (*uvm_pmm_chunk_used)(
+	int (*gpu_block_access)(
 		uvm_pmm_gpu_t *pmm,
 		uvm_gpu_chunk_t *chunk,
 		struct list_head *list);
 
-	int (*uvm_pmm_eviction_prepare)(
+	int (*gpu_evict_prepare)(
 		uvm_pmm_gpu_t *pmm,
 		struct list_head *va_block_used,
 		struct list_head *va_block_unused);
@@ -62,18 +62,18 @@ struct uvm_gpu_ext {
 
 /* Define our custom struct_ops operations */
 /* Global instance that BPF programs will implement */
-static struct uvm_gpu_ext __rcu *uvm_ops;
+static struct gpu_mem_ops __rcu *uvm_ops;
 
 /* Proc file to trigger the struct_ops */
 static struct proc_dir_entry *trigger_file;
 
 /* CFI stub functions - required for struct_ops */
-static int uvm_gpu_ext__uvm_bpf_test_trigger_kfunc(const char *buf, int len)
+static int gpu_mem_ops__gpu_test_trigger(const char *buf, int len)
 {
 	return 0;
 }
 
-static int uvm_gpu_ext__uvm_prefetch_before_compute(
+static int gpu_mem_ops__gpu_page_prefetch(
 	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
@@ -82,7 +82,7 @@ static int uvm_gpu_ext__uvm_prefetch_before_compute(
 	return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
+static int gpu_mem_ops__gpu_page_prefetch_iter(
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
@@ -92,7 +92,7 @@ static int uvm_gpu_ext__uvm_prefetch_on_tree_iter(
 	return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_activate(
+static int gpu_mem_ops__gpu_block_activate(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
 	struct list_head *list)
@@ -100,7 +100,7 @@ static int uvm_gpu_ext__uvm_pmm_chunk_activate(
 	return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_chunk_used(
+static int gpu_mem_ops__gpu_block_access(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
 	struct list_head *list)
@@ -108,7 +108,7 @@ static int uvm_gpu_ext__uvm_pmm_chunk_used(
 	return UVM_BPF_ACTION_DEFAULT;
 }
 
-static int uvm_gpu_ext__uvm_pmm_eviction_prepare(
+static int gpu_mem_ops__gpu_evict_prepare(
 	uvm_pmm_gpu_t *pmm,
 	struct list_head *va_block_used,
 	struct list_head *va_block_unused)
@@ -117,27 +117,27 @@ static int uvm_gpu_ext__uvm_pmm_eviction_prepare(
 }
 
 /* CFI stubs structure */
-static struct uvm_gpu_ext __bpf_ops_uvm_gpu_ext = {
-	.uvm_bpf_test_trigger_kfunc = uvm_gpu_ext__uvm_bpf_test_trigger_kfunc,
-	.uvm_prefetch_before_compute = uvm_gpu_ext__uvm_prefetch_before_compute,
-	.uvm_prefetch_on_tree_iter = uvm_gpu_ext__uvm_prefetch_on_tree_iter,
-	.uvm_pmm_chunk_activate = uvm_gpu_ext__uvm_pmm_chunk_activate,
-	.uvm_pmm_chunk_used = uvm_gpu_ext__uvm_pmm_chunk_used,
-	.uvm_pmm_eviction_prepare = uvm_gpu_ext__uvm_pmm_eviction_prepare,
+static struct gpu_mem_ops __bpf_ops_gpu_mem_ops = {
+	.gpu_test_trigger = gpu_mem_ops__gpu_test_trigger,
+	.gpu_page_prefetch = gpu_mem_ops__gpu_page_prefetch,
+	.gpu_page_prefetch_iter = gpu_mem_ops__gpu_page_prefetch_iter,
+	.gpu_block_activate = gpu_mem_ops__gpu_block_activate,
+	.gpu_block_access = gpu_mem_ops__gpu_block_access,
+	.gpu_evict_prepare = gpu_mem_ops__gpu_evict_prepare,
 };
 
 /* Begin kfunc definitions */
 __bpf_kfunc_start_defs();
 
-/* Define the bpf_uvm_strstr kfunc */
-__bpf_kfunc int bpf_uvm_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz)
+/* Define the bpf_gpu_strstr kfunc */
+__bpf_kfunc int bpf_gpu_strstr(const char *str, u32 str__sz, const char *substr, u32 substr__sz)
 {
 	// For test only, not functional
 	return -1;
 }
 
 /* Set the prefetch region - allows BPF to read and modify the region */
-__bpf_kfunc void bpf_uvm_set_va_block_region(uvm_va_block_region_t *region,
+__bpf_kfunc void bpf_gpu_set_prefetch_region(uvm_va_block_region_t *region,
 					     uvm_page_index_t first,
 					     uvm_page_index_t outer)
 {
@@ -148,7 +148,7 @@ __bpf_kfunc void bpf_uvm_set_va_block_region(uvm_va_block_region_t *region,
 }
 
 /* Move chunk to head of the list (makes it highest priority for eviction) */
-__bpf_kfunc void bpf_uvm_pmm_chunk_move_head(uvm_gpu_chunk_t *chunk,
+__bpf_kfunc void bpf_gpu_block_move_head(uvm_gpu_chunk_t *chunk,
 					     struct list_head *list)
 {
 	if (!chunk || !list)
@@ -158,7 +158,7 @@ __bpf_kfunc void bpf_uvm_pmm_chunk_move_head(uvm_gpu_chunk_t *chunk,
 }
 
 /* Move chunk to tail of the list (makes it lowest priority for eviction) */
-__bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk,
+__bpf_kfunc void bpf_gpu_block_move_tail(uvm_gpu_chunk_t *chunk,
 					     struct list_head *list)
 {
 	if (!chunk || !list)
@@ -174,7 +174,7 @@ __bpf_kfunc void bpf_uvm_pmm_chunk_move_tail(uvm_gpu_chunk_t *chunk,
  * Acquires va_space read lock internally via uvm_migrate_bpf().
  * Caller must ensure va_space_handle is valid (obtained from same process
  * context, e.g., during active benchmark). */
-__bpf_kfunc int bpf_uvm_migrate_range(u64 va_space_handle, u64 addr, u64 length)
+__bpf_kfunc int bpf_gpu_migrate_range(u64 va_space_handle, u64 addr, u64 length)
 {
 	uvm_va_space_t *va_space = (uvm_va_space_t *)va_space_handle;
 	if (!va_space || !length)
@@ -187,11 +187,11 @@ __bpf_kfunc_end_defs();
 
 /* Define the BTF kfuncs ID set */
 BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
-BTF_ID_FLAGS(func, bpf_uvm_strstr)
-BTF_ID_FLAGS(func, bpf_uvm_set_va_block_region, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_head, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_uvm_pmm_chunk_move_tail, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_uvm_migrate_range, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_gpu_strstr)
+BTF_ID_FLAGS(func, bpf_gpu_set_prefetch_region, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_gpu_block_move_head, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_gpu_block_move_tail, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_gpu_migrate_range, KF_SLEEPABLE)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -201,13 +201,13 @@ static const struct btf_kfunc_id_set uvm_bpf_kfunc_set = {
 };
 
 /* BTF and verifier callbacks */
-static int uvm_gpu_ext_init(struct btf *btf)
+static int gpu_mem_ops_init(struct btf *btf)
 {
 	/* Initialize BTF if needed */
 	return 0;
 }
 
-static bool uvm_gpu_ext_is_valid_access(int off, int size,
+static bool gpu_mem_ops_is_valid_access(int off, int size,
 					    enum bpf_access_type type,
 					    const struct bpf_prog *prog,
 					    struct bpf_insn_access_aux *info)
@@ -218,19 +218,19 @@ static bool uvm_gpu_ext_is_valid_access(int off, int size,
 
 /* Allow specific BPF helpers to be used in struct_ops programs */
 static const struct bpf_func_proto *
-uvm_gpu_ext_get_func_proto(enum bpf_func_id func_id,
+gpu_mem_ops_get_func_proto(enum bpf_func_id func_id,
 			       const struct bpf_prog *prog)
 {
 	/* Use base func proto which includes trace_printk and other basic helpers */
 	return bpf_base_func_proto(func_id, prog);
 }
 
-static const struct bpf_verifier_ops uvm_gpu_ext_verifier_ops = {
-	.is_valid_access = uvm_gpu_ext_is_valid_access,
-	.get_func_proto = uvm_gpu_ext_get_func_proto,
+static const struct bpf_verifier_ops gpu_mem_ops_verifier_ops = {
+	.is_valid_access = gpu_mem_ops_is_valid_access,
+	.get_func_proto = gpu_mem_ops_get_func_proto,
 };
 
-static int uvm_gpu_ext_init_member(const struct btf_type *t,
+static int gpu_mem_ops_init_member(const struct btf_type *t,
 				       const struct btf_member *member,
 				       void *kdata, const void *udata)
 {
@@ -239,40 +239,40 @@ static int uvm_gpu_ext_init_member(const struct btf_type *t,
 }
 
 /* Registration function */
-static int uvm_gpu_ext_reg(void *kdata, struct bpf_link *link)
+static int gpu_mem_ops_reg(void *kdata, struct bpf_link *link)
 {
-	struct uvm_gpu_ext *ops = kdata;
+	struct gpu_mem_ops *ops = kdata;
 
 	/* Only one instance at a time */
 	if (cmpxchg(&uvm_ops, NULL, ops) != NULL)
 		return -EEXIST;
 
-	pr_info("uvm_gpu_ext registered in nvidia-uvm\n");
+	pr_info("gpu_mem_ops registered in nvidia-uvm\n");
 	return 0;
 }
 
 /* Unregistration function */
-static void uvm_gpu_ext_unreg(void *kdata, struct bpf_link *link)
+static void gpu_mem_ops_unreg(void *kdata, struct bpf_link *link)
 {
-	struct uvm_gpu_ext *ops = kdata;
+	struct gpu_mem_ops *ops = kdata;
 
 	if (cmpxchg(&uvm_ops, ops, NULL) != ops) {
-		pr_warn("uvm_gpu_ext: unexpected unreg in nvidia-uvm\n");
+		pr_warn("gpu_mem_ops: unexpected unreg in nvidia-uvm\n");
 		return;
 	}
 
-	pr_info("uvm_gpu_ext unregistered from nvidia-uvm\n");
+	pr_info("gpu_mem_ops unregistered from nvidia-uvm\n");
 }
 
 /* Struct ops definition */
-static struct bpf_struct_ops uvm_gpu_ext_struct_ops = {
-	.verifier_ops = &uvm_gpu_ext_verifier_ops,
-	.init = uvm_gpu_ext_init,
-	.init_member = uvm_gpu_ext_init_member,
-	.reg = uvm_gpu_ext_reg,
-	.unreg = uvm_gpu_ext_unreg,
-	.cfi_stubs = &__bpf_ops_uvm_gpu_ext,
-	.name = "uvm_gpu_ext",
+static struct bpf_struct_ops gpu_mem_ops_struct_ops = {
+	.verifier_ops = &gpu_mem_ops_verifier_ops,
+	.init = gpu_mem_ops_init,
+	.init_member = gpu_mem_ops_init_member,
+	.reg = gpu_mem_ops_reg,
+	.unreg = gpu_mem_ops_unreg,
+	.cfi_stubs = &__bpf_ops_gpu_mem_ops,
+	.name = "gpu_mem_ops",
 	.owner = THIS_MODULE,
 };
 
@@ -280,7 +280,7 @@ static struct bpf_struct_ops uvm_gpu_ext_struct_ops = {
 static ssize_t trigger_write(struct file *file, const char __user *buf,
 			     size_t count, loff_t *pos)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 	char kbuf[64];
 	int ret = 0;
 
@@ -297,9 +297,9 @@ static ssize_t trigger_write(struct file *file, const char __user *buf,
 	if (ops) {
 		pr_info("UVM: Calling struct_ops callbacks:\n");
 
-		if (ops->uvm_bpf_test_trigger_kfunc) {
-			ret = ops->uvm_bpf_test_trigger_kfunc(kbuf, count);
-			pr_info("UVM: uvm_bpf_test_trigger_kfunc() returned: %d\n", ret);
+		if (ops->gpu_test_trigger) {
+			ret = ops->gpu_test_trigger(kbuf, count);
+			pr_info("UVM: gpu_test_trigger() returned: %d\n", ret);
 		}
 	} else {
 		pr_info("UVM: No struct_ops registered\n");
@@ -326,7 +326,7 @@ int uvm_bpf_struct_ops_init(void)
 	pr_info("UVM: kfunc ID set registered successfully\n");
 
 	/* Register the struct_ops */
-	ret = register_bpf_struct_ops(&uvm_gpu_ext_struct_ops, uvm_gpu_ext);
+	ret = register_bpf_struct_ops(&gpu_mem_ops_struct_ops, gpu_mem_ops);
 	if (ret) {
 		pr_err("UVM: Failed to register struct_ops: %d\n", ret);
 		return ret;
@@ -350,19 +350,19 @@ void uvm_bpf_struct_ops_exit(void)
 }
 
 /* Wrapper functions for calling BPF hooks */
-enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
+enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch(
 	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *result_region)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 	int ret = UVM_BPF_ACTION_DEFAULT;
 
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->uvm_prefetch_before_compute) {
-		ret = ops->uvm_prefetch_before_compute(page_index, bitmap_tree,
+	if (ops && ops->gpu_page_prefetch) {
+		ret = ops->gpu_page_prefetch(page_index, bitmap_tree,
 						       max_prefetch_region,
 						       result_region);
 	}
@@ -371,20 +371,20 @@ enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
 	return (enum uvm_bpf_action)ret;
 }
 
-enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
+enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch_iter(
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
 	unsigned int counter,
 	uvm_va_block_region_t *prefetch_region)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 	int ret = UVM_BPF_ACTION_DEFAULT;
 
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->uvm_prefetch_on_tree_iter) {
-		ret = ops->uvm_prefetch_on_tree_iter(bitmap_tree,
+	if (ops && ops->gpu_page_prefetch_iter) {
+		ret = ops->gpu_page_prefetch_iter(bitmap_tree,
 						     max_prefetch_region, current_region,
 						     counter, prefetch_region);
 	}
@@ -394,50 +394,50 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
 }
 
 /* PMM eviction policy hook wrappers */
-void uvm_bpf_call_pmm_chunk_activate(
+void uvm_bpf_call_gpu_block_activate(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
 	struct list_head *list)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->uvm_pmm_chunk_activate) {
-		ops->uvm_pmm_chunk_activate(pmm, chunk, list);
+	if (ops && ops->gpu_block_activate) {
+		ops->gpu_block_activate(pmm, chunk, list);
 	}
 	rcu_read_unlock();
 }
 
-enum uvm_bpf_action uvm_bpf_call_pmm_chunk_used(
+enum uvm_bpf_action uvm_bpf_call_gpu_block_access(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
 	struct list_head *list)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 	int ret = UVM_BPF_ACTION_DEFAULT;
 
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->uvm_pmm_chunk_used) {
-		ret = ops->uvm_pmm_chunk_used(pmm, chunk, list);
+	if (ops && ops->gpu_block_access) {
+		ret = ops->gpu_block_access(pmm, chunk, list);
 	}
 	rcu_read_unlock();
 
 	return (enum uvm_bpf_action)ret;
 }
 
-void uvm_bpf_call_pmm_eviction_prepare(
+void uvm_bpf_call_gpu_evict_prepare(
 	uvm_pmm_gpu_t *pmm,
 	struct list_head *va_block_used,
 	struct list_head *va_block_unused)
 {
-	struct uvm_gpu_ext *ops;
+	struct gpu_mem_ops *ops;
 
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->uvm_pmm_eviction_prepare) {
-		ops->uvm_pmm_eviction_prepare(pmm, va_block_used, va_block_unused);
+	if (ops && ops->gpu_evict_prepare) {
+		ops->gpu_evict_prepare(pmm, va_block_used, va_block_unused);
 	}
 	rcu_read_unlock();
 }
