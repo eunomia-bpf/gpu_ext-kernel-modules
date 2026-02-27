@@ -17,13 +17,13 @@ int uvm_bpf_struct_ops_init(void);
 void uvm_bpf_struct_ops_exit(void);
 
 /* Wrapper functions for calling BPF hooks from kernel code */
-enum uvm_bpf_action uvm_bpf_call_before_compute_prefetch(
+enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch(
     uvm_page_index_t page_index,
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,
     uvm_va_block_region_t *result_region);
 
-enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
+enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch_iter(
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,
     uvm_va_block_region_t *current_region,
@@ -31,17 +31,17 @@ enum uvm_bpf_action uvm_bpf_call_on_tree_iter(
     uvm_va_block_region_t *prefetch_region);
 
 /* PMM eviction policy hook wrapper functions */
-void uvm_bpf_call_pmm_chunk_activate(
+void uvm_bpf_call_gpu_block_activate(
     uvm_pmm_gpu_t *pmm,
     uvm_gpu_chunk_t *chunk,
     struct list_head *list);
 
-enum uvm_bpf_action uvm_bpf_call_pmm_chunk_used(
+enum uvm_bpf_action uvm_bpf_call_gpu_block_access(
     uvm_pmm_gpu_t *pmm,
     uvm_gpu_chunk_t *chunk,
     struct list_head *list);
 
-void uvm_bpf_call_pmm_eviction_prepare(
+void uvm_bpf_call_gpu_evict_prepare(
     uvm_pmm_gpu_t *pmm,
     struct list_head *va_block_used,
     struct list_head *va_block_unused);

@@ -110,7 +110,7 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     enum uvm_bpf_action action;
 
     // Call BPF hook before computation
-    action = uvm_bpf_call_before_compute_prefetch(page_index, bitmap_tree,
+    action = uvm_bpf_call_gpu_page_prefetch(page_index, bitmap_tree,
                                                    &max_prefetch_region, &prefetch_region);
 
     if (action == UVM_BPF_ACTION_BYPASS) {
@@ -124,8 +124,8 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
             uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
 
             // Call BPF hook on each tree iteration
-            // BPF can modify prefetch_region via kfunc bpf_uvm_set_va_block_region(prefetch_region, ...)
-            (void)uvm_bpf_call_on_tree_iter(bitmap_tree,
+            // BPF can modify prefetch_region via kfunc bpf_gpu_set_prefetch_region(prefetch_region, ...)
+            (void)uvm_bpf_call_gpu_page_prefetch_iter(bitmap_tree,
                                                &max_prefetch_region, &subregion,
                                                counter, &prefetch_region);
         }
