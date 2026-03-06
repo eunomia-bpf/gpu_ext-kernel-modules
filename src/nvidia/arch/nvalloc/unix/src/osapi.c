@@ -57,6 +57,7 @@
 #include "rmapi/exports.h"
 #include "rmapi/rmapi_utils.h"
 #include "rmapi/rs_utils.h"
+#include <ctrl/ctrla06c.h>
 #include "rmapi/resource_fwd_decls.h"
 #include <nv-kernel-rmapi-ops.h>
 #include <rmobjexportimport.h>
@@ -6229,4 +6230,43 @@ rm_pmu_perfmon_get_load_exit:
     NV_EXIT_RM_RUNTIME(sp, fp);
 
     return status;
+}
+
+/*
+ * nv_gpu_sched_do_preempt - Kernel-internal TSG preempt API
+ *
+ * Called from BPF kfunc (sleepable context) to preempt a GPU TSG.
+ * Uses RS_PRIV_LEVEL_KERNEL to bypass client ownership checks,
+ * enabling cross-process preemption from BPF programs.
+ */
+NvU32 NV_API_CALL nv_gpu_sched_do_preempt(
+    nvidia_stack_t *sp,
+    NvU32 hClient,
+    NvU32 hTsg)
+{
+    void *fp;
+    NVOS54_PARAMETERS params = { 0 };
+    NVA06C_CTRL_PREEMPT_PARAMS preemptParams = { 0 };
+    API_SECURITY_INFO secInfo = { 0 };
+
+    NV_ENTER_RM_RUNTIME(sp, fp);
+
+    preemptParams.bWait = NV_TRUE;
+    preemptParams.bManualTimeout = NV_TRUE;
+    preemptParams.timeoutUs = 100000;
+
+    params.hClient = hClient;
+    params.hObject = hTsg;
+    params.cmd = 0xa06c0105; /* NVA06C_CTRL_CMD_PREEMPT */
+    params.params = NvP64_VALUE(&preemptParams);
+    params.paramsSize = sizeof(preemptParams);
+
+    secInfo.privLevel = RS_PRIV_LEVEL_KERNEL;
+    secInfo.paramLocation = PARAM_LOCATION_KERNEL;
+
+    Nv04ControlWithSecInfo(&params, secInfo);
+
+    NV_EXIT_RM_RUNTIME(sp, fp);
+
+    return params.status;
 }

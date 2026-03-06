@@ -23,6 +23,9 @@
 #include <linux/btf_ids.h>
 #include <linux/bpf_verifier.h>
 
+/* Forward declaration - implemented in nv-kernel.o (osapi.c) */
+extern NvU32 nv_gpu_sched_do_preempt(nvidia_stack_t *sp, NvU32 hClient, NvU32 hTsg);
+
 /* Compatibility definitions for older kernel versions */
 #ifndef BTF_SET8_KFUNCS
 #define BTF_SET8_KFUNCS     (1 << 0)
@@ -107,6 +110,31 @@ __bpf_kfunc void bpf_nv_gpu_reject_bind(struct nv_gpu_bind_ctx *ctx)
         ctx->allow = 0;
 }
 
+/*
+ * bpf_nv_gpu_preempt_tsg - Preempt a GPU TSG from BPF context
+ *
+ * Must be called from sleepable BPF context (e.g., bpf_wq callback).
+ * Triggers GPU TSG preemption via RM internal API, bypassing the
+ * userspace ioctl path. Enables cross-process preemption.
+ */
+__bpf_kfunc int bpf_nv_gpu_preempt_tsg(u32 hClient, u32 hTsg)
+{
+    nvidia_stack_t *sp = NULL;
+    NvU32 status;
+
+    if (!hClient || !hTsg)
+        return -EINVAL;
+
+    if (nv_kmem_cache_alloc_stack(&sp) != 0)
+        return -ENOMEM;
+
+    status = nv_gpu_sched_do_preempt(sp, hClient, hTsg);
+
+    nv_kmem_cache_free_stack(sp);
+
+    return (status == 0) ? 0 : -EIO;
+}
+
 __bpf_kfunc_end_defs();
 
 /* Define the BTF kfuncs ID set */
@@ -114,12 +142,26 @@ BTF_KFUNCS_START(nv_gpu_sched_kfunc_ids_set)
 BTF_ID_FLAGS(func, bpf_nv_gpu_set_timeslice, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_nv_gpu_set_interleave, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_nv_gpu_reject_bind, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_nv_gpu_preempt_tsg, KF_SLEEPABLE)
 BTF_KFUNCS_END(nv_gpu_sched_kfunc_ids_set)
 
-/* Register the kfunc ID set */
+/* Register the kfunc ID set for struct_ops */
 static const struct btf_kfunc_id_set nv_gpu_sched_kfunc_set = {
     .owner = THIS_MODULE,
     .set = &nv_gpu_sched_kfunc_ids_set,
+};
+
+/*
+ * Separate kfunc set for preempt_tsg - registered for all program types
+ * so it can be called from kprobe/tracepoint bpf_wq callbacks.
+ */
+BTF_KFUNCS_START(nv_gpu_preempt_kfunc_ids_set)
+BTF_ID_FLAGS(func, bpf_nv_gpu_preempt_tsg, KF_SLEEPABLE)
+BTF_KFUNCS_END(nv_gpu_preempt_kfunc_ids_set)
+
+static const struct btf_kfunc_id_set nv_gpu_preempt_kfunc_set = {
+    .owner = THIS_MODULE,
+    .set = &nv_gpu_preempt_kfunc_ids_set,
 };
 
 /*
@@ -281,6 +323,12 @@ int nv_gpu_sched_struct_ops_init(void)
     ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &nv_gpu_sched_kfunc_set);
     if (ret) {
         pr_err("nvidia: Failed to register GPU sched kfunc ID set: %d\n", ret);
+        return ret;
+    }
+
+    ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_UNSPEC, &nv_gpu_preempt_kfunc_set);
+    if (ret) {
+        pr_err("nvidia: Failed to register GPU preempt kfunc ID set: %d\n", ret);
         return ret;
     }
 

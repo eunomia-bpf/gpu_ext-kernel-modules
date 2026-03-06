@@ -213,3 +213,4 @@
 --undefined=rm_acpi_nvpcf_notify
 --undefined=rm_notify_gpu_addition
 --undefined=rm_notify_gpu_removal
+--undefined=nv_gpu_sched_do_preempt
