@@ -333,6 +333,13 @@ int uvm_bpf_struct_ops_init(void)
 	}
 	pr_info("UVM: kfunc ID set registered successfully\n");
 
+	/* Also register for tracing programs (kprobe/uprobe) so they can call gpu kfuncs */
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_KPROBE, &uvm_bpf_kfunc_set);
+	if (ret) {
+		pr_warn("UVM: Failed to register kfunc for kprobe progs: %d (non-fatal)\n", ret);
+		/* Non-fatal: struct_ops still works */
+	}
+
 	/* Register the struct_ops */
 	ret = register_bpf_struct_ops(&gpu_mem_ops_struct_ops, gpu_mem_ops);
 	if (ret) {
