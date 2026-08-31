@@ -23,6 +23,11 @@
 #include <linux/btf_ids.h>
 #include <linux/bpf_verifier.h>
 
+/* New kernels require trusted kfunc arguments by default and removed this flag. */
+#ifndef KF_TRUSTED_ARGS
+#define KF_TRUSTED_ARGS 0
+#endif
+
 /* Forward declaration - implemented in nv-kernel.o (osapi.c) */
 extern NvU32 nv_gpu_sched_do_preempt(nvidia_stack_t *sp, NvU32 hClient, NvU32 hTsg);
 

@@ -10,6 +10,11 @@
 #include "uvm_bpf_struct_ops.h"
 #include "uvm_migrate.h"
 
+/* New kernels require trusted kfunc arguments by default and removed this flag. */
+#ifndef KF_TRUSTED_ARGS
+#define KF_TRUSTED_ARGS 0
+#endif
+
 /* Compatibility definitions for lower kernel versions */
 #ifndef BTF_SET8_KFUNCS
 /* This flag implies BTF_SET8 holds kfunc(s) */
