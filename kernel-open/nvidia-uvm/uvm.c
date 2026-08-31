@@ -1215,7 +1215,8 @@ error:
 
 static int __init uvm_init_entry(void)
 {
-   printk(KERN_INFO "NVIDIA UVM: Custom build by yunwei37 - UVM driver loading (version 575.57.08)\n");
+    printk(KERN_INFO "NVIDIA UVM: Custom build by yunwei37 - UVM driver loading (version %s)\n",
+           NV_VERSION_STRING);
    UVM_ENTRY_RET(uvm_init());
 }
 

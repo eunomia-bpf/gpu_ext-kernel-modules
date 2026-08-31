@@ -848,7 +848,8 @@ static int __init nvidia_init_module(void)
     const NvBool is_nvswitch_present = os_is_nvswitch_present();
     int num_pci_devices = 0, num_platform_devices = 0;
 
-    printk(KERN_INFO "NVIDIA: Custom build by yunwei37 - NVIDIA driver loading (version 575.57.08)\n");
+    printk(KERN_INFO "NVIDIA: Custom build by yunwei37 - NVIDIA driver loading (version %s)\n",
+           NV_VERSION_STRING);
     nv_memdbg_init();
 
     rc = nv_procfs_init();
