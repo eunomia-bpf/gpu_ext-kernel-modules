@@ -1161,6 +1161,7 @@ static int uvm_init(void)
 {
     bool initialized_globals = false;
     bool added_device = false;
+    bool initialized_tools = false;
     bool initialized_bpf_struct_ops = false;
     int ret;
 
@@ -1184,6 +1185,7 @@ static int uvm_init(void)
         UVM_ERR_PRINT("uvm_tools_init() failed: %d\n", ret);
         goto error;
     }
+    initialized_tools = true;
 
     /* Initialize BPF struct_ops support */
     ret = uvm_bpf_struct_ops_init();
@@ -1201,6 +1203,9 @@ static int uvm_init(void)
 error:
     if (initialized_bpf_struct_ops)
         uvm_bpf_struct_ops_exit();
+
+    if (initialized_tools)
+        uvm_tools_exit();
 
     if (added_device)
         uvm_chardev_exit();
