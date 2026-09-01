@@ -33,6 +33,7 @@
 #include "uvm_push.h"
 #include "uvm_mem.h"
 #include "uvm_kvmalloc.h"
+#include "uvm_bpf_struct_ops.h"
 
 #include "uvm_test.h"
 #include "uvm_test_ioctl.h"
@@ -1118,5 +1119,524 @@ NV_STATUS uvm_test_pmm_chunk_with_elevated_page(UVM_TEST_PMM_CHUNK_WITH_ELEVATED
 
 out:
     uvm_va_space_up_read(va_space);
+    return status;
+}
+
+typedef struct
+{
+    struct list_head *prev;
+    struct list_head *next;
+    uvm_pmm_root_list_state_t state;
+    NvU64 generation;
+} pmm_bpf_test_entry_snapshot_t;
+
+static void pmm_bpf_test_init_decision(uvm_bpf_pmm_decision_ctx_t *decision,
+                                       uvm_pmm_gpu_t *pmm,
+                                       uvm_gpu_root_chunk_t *root)
+{
+    memset(decision, 0, sizeof(*decision));
+    decision->pmm = pmm;
+    decision->root_chunk = root;
+    decision->observed.owner_id = (NvU64)(unsigned long)pmm;
+    decision->observed.root_id = (NvU64)(unsigned long)root;
+    decision->observed.generation = root->list_generation;
+    decision->observed.source = root->list_state;
+}
+
+static pmm_bpf_test_entry_snapshot_t pmm_bpf_test_snapshot(uvm_gpu_root_chunk_t *root)
+{
+    pmm_bpf_test_entry_snapshot_t snapshot = {
+        .prev = root->chunk.list.prev,
+        .next = root->chunk.list.next,
+        .state = root->list_state,
+        .generation = root->list_generation,
+    };
+
+    return snapshot;
+}
+
+static bool pmm_bpf_test_snapshot_matches(uvm_gpu_root_chunk_t *root,
+                                          const pmm_bpf_test_entry_snapshot_t *snapshot)
+{
+    return root->chunk.list.prev == snapshot->prev &&
+           root->chunk.list.next == snapshot->next &&
+           root->list_state == snapshot->state &&
+           root->list_generation == snapshot->generation;
+}
+
+static bool pmm_bpf_test_is_head(struct list_head *head, uvm_gpu_root_chunk_t *root)
+{
+    return head->next == &root->chunk.list;
+}
+
+static bool pmm_bpf_test_is_tail(struct list_head *head, uvm_gpu_root_chunk_t *root)
+{
+    return head->prev == &root->chunk.list;
+}
+
+static void pmm_bpf_test_place(uvm_pmm_gpu_t *pmm,
+                               uvm_gpu_root_chunk_t *root,
+                               struct list_head *destination,
+                               uvm_pmm_root_list_state_t state,
+                               uvm_pmm_root_list_op_t operation)
+{
+    uvm_pmm_root_list_update_locked(pmm, &root->chunk, destination, state, operation);
+}
+
+static enum nv_gpu_pmm_access_effect
+pmm_bpf_test_access(uvm_pmm_gpu_t *pmm,
+                    uvm_gpu_root_chunk_t *root,
+                    uvm_bpf_pmm_decision_ctx_t *decision,
+                    NvS64 action,
+                    struct list_head *native_destination,
+                    uvm_pmm_root_list_state_t native_state)
+{
+    enum nv_gpu_pmm_access_effect effect =
+        uvm_pmm_bpf_apply_access_locked(pmm, &root->chunk, decision, action);
+
+    if (effect == NV_GPU_PMM_ACCESS_NATIVE) {
+        pmm_bpf_test_place(pmm,
+                           root,
+                           native_destination,
+                           native_state,
+                           UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+    }
+
+    return effect;
+}
+
+typedef enum
+{
+    PMM_BPF_TEST_INVALID_ONLY,
+    PMM_BPF_TEST_VALID_THEN_INVALID,
+    PMM_BPF_TEST_INVALID_THEN_VALID,
+    PMM_BPF_TEST_IDENTICAL_INVALID_REPEAT,
+} pmm_bpf_test_invalid_sequence_t;
+
+static void pmm_bpf_test_record_invalid_sequence(uvm_bpf_pmm_decision_ctx_t *decision,
+                                                 pmm_bpf_test_invalid_sequence_t sequence)
+{
+    switch (sequence) {
+        case PMM_BPF_TEST_INVALID_ONLY:
+            nv_gpu_transition_record_pmm(&decision->request, 99, NV_GPU_PMM_POSITION_HEAD);
+            break;
+        case PMM_BPF_TEST_VALID_THEN_INVALID:
+            nv_gpu_transition_record_pmm(&decision->request,
+                                         NV_GPU_PMM_DESTINATION_USED,
+                                         NV_GPU_PMM_POSITION_HEAD);
+            nv_gpu_transition_record_pmm(&decision->request, 99, NV_GPU_PMM_POSITION_HEAD);
+            break;
+        case PMM_BPF_TEST_INVALID_THEN_VALID:
+            nv_gpu_transition_record_pmm(&decision->request, 99, NV_GPU_PMM_POSITION_HEAD);
+            nv_gpu_transition_record_pmm(&decision->request,
+                                         NV_GPU_PMM_DESTINATION_USED,
+                                         NV_GPU_PMM_POSITION_HEAD);
+            break;
+        case PMM_BPF_TEST_IDENTICAL_INVALID_REPEAT:
+            nv_gpu_transition_record_pmm(&decision->request, 99, NV_GPU_PMM_POSITION_HEAD);
+            nv_gpu_transition_record_pmm(&decision->request, 99, NV_GPU_PMM_POSITION_HEAD);
+            break;
+        default:
+            UVM_ASSERT(false);
+    }
+}
+
+static bool pmm_bpf_test_invalid_matrix(uvm_pmm_gpu_t *pmm,
+                                        uvm_gpu_root_chunk_t *root,
+                                        NvS64 action)
+{
+    pmm_bpf_test_invalid_sequence_t sequence;
+
+    for (sequence = PMM_BPF_TEST_INVALID_ONLY;
+         sequence <= PMM_BPF_TEST_IDENTICAL_INVALID_REPEAT;
+         ++sequence) {
+        uvm_bpf_pmm_decision_ctx_t decision;
+        pmm_bpf_test_entry_snapshot_t entry;
+
+        pmm_bpf_test_place(pmm,
+                           root,
+                           &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                           UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                           UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+        pmm_bpf_test_init_decision(&decision, pmm, root);
+        pmm_bpf_test_record_invalid_sequence(&decision, sequence);
+        entry = pmm_bpf_test_snapshot(root);
+
+        if (pmm_bpf_test_access(pmm,
+                                root,
+                                &decision,
+                                action,
+                                &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                                UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED) != NV_GPU_PMM_ACCESS_PRESERVE)
+            return false;
+        if (!pmm_bpf_test_snapshot_matches(root, &entry))
+            return false;
+    }
+
+    return true;
+}
+
+static bool pmm_bpf_test_run_locked(uvm_pmm_gpu_t *pmm,
+                                    uvm_gpu_root_chunk_t *roots,
+                                    uvm_pmm_gpu_t *foreign_pmm,
+                                    uvm_gpu_root_chunk_t *foreign_root)
+{
+    uvm_gpu_root_chunk_t *root = &roots[0];
+    uvm_gpu_root_chunk_t *peer = &roots[1];
+    uvm_bpf_pmm_decision_ctx_t decision;
+    pmm_bpf_test_entry_snapshot_t entry;
+    NvU64 generation;
+
+    // A subchunk alias must use the same helper without changing root metadata.
+    {
+        uvm_gpu_chunk_t subchunk = {0};
+        LIST_HEAD(subchunk_list);
+
+        uvm_gpu_chunk_set_size(&subchunk, UVM_CHUNK_SIZE_MAX / 2);
+        generation = root->list_generation;
+        uvm_pmm_root_list_update_locked(pmm,
+                                        &subchunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_INIT);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        &subchunk,
+                                        &subchunk_list,
+                                        UVM_PMM_ROOT_LIST_FREE,
+                                        UVM_PMM_ROOT_LIST_OP_ADD_TAIL);
+        if (root->list_generation != generation)
+            return false;
+    }
+
+    // No request + DEFAULT performs the native move exactly once.
+    pmm_bpf_test_place(pmm,
+                       root,
+                       &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                       UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                       UVM_PMM_ROOT_LIST_OP_MOVE_HEAD);
+    generation = root->list_generation;
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_DEFAULT,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_NATIVE ||
+        !pmm_bpf_test_is_tail(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED], root) ||
+        root->list_generation != generation)
+        return false;
+
+    // No request + BYPASS, or an invalid raw action, preserves entry state.
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    entry = pmm_bpf_test_snapshot(root);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_BYPASS,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_ENTER_LOOP,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    // A legal same-list request commits once and preserves generation.
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    if (nv_gpu_transition_record_pmm(&decision.request,
+                                     NV_GPU_PMM_DESTINATION_USED,
+                                     NV_GPU_PMM_POSITION_HEAD) != NV_GPU_TRANSITION_APPLY ||
+        nv_gpu_transition_record_pmm(&decision.request,
+                                     NV_GPU_PMM_DESTINATION_USED,
+                                     NV_GPU_PMM_POSITION_HEAD) != NV_GPU_TRANSITION_NOOP_REPEAT)
+        return false;
+    generation = root->list_generation;
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_DEFAULT,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED) != NV_GPU_PMM_ACCESS_COMMIT ||
+        !pmm_bpf_test_is_head(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED], root) ||
+        root->list_generation != generation)
+        return false;
+
+    // A later callback can reverse HEAD to TAIL; request state is callback-local.
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_TAIL);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_BYPASS,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED) != NV_GPU_PMM_ACCESS_COMMIT ||
+        !pmm_bpf_test_is_tail(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED], root) ||
+        root->list_generation != generation)
+        return false;
+
+    // A cross-list request advances membership generation and suppresses native fallback.
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_UNUSED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_DEFAULT,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_COMMIT ||
+        root->list_state != UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED ||
+        root->list_generation != generation + 1 ||
+        !pmm_bpf_test_is_head(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED], root))
+        return false;
+
+    // A legal request paired with an invalid action must not commit.
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    entry = pmm_bpf_test_snapshot(root);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_ENTER_LOOP,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    if (!pmm_bpf_test_invalid_matrix(pmm, root, UVM_BPF_ACTION_DEFAULT) ||
+        !pmm_bpf_test_invalid_matrix(pmm, root, UVM_BPF_ACTION_BYPASS))
+        return false;
+
+    // A stale callback source cannot commit after a native cross-list move.
+    pmm_bpf_test_place(pmm,
+                       root,
+                       &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                       UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                       UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_UNUSED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    pmm_bpf_test_place(pmm,
+                       root,
+                       &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED],
+                       UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED,
+                       UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+    entry = pmm_bpf_test_snapshot(root);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_DEFAULT,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    // A decision captured from another PMM/root is rejected by identity checks.
+    pmm_bpf_test_init_decision(&decision, foreign_pmm, foreign_root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    entry = pmm_bpf_test_snapshot(root);
+    if (pmm_bpf_test_access(pmm,
+                            root,
+                            &decision,
+                            UVM_BPF_ACTION_BYPASS,
+                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    // FREE, DISCARDED, EVICTION, NONE, and LAZY_FREE are never legal policy sources.
+    {
+        struct list_head *heads[] = {
+            &pmm->free_list[UVM_PMM_GPU_MEMORY_TYPE_USER][0][UVM_PMM_LIST_ZERO],
+            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_DISCARDED],
+            NULL,
+            NULL,
+            &pmm->root_chunks.va_block_lazy_free,
+        };
+        uvm_pmm_root_list_state_t states[] = {
+            UVM_PMM_ROOT_LIST_FREE,
+            UVM_PMM_ROOT_LIST_VA_BLOCK_DISCARDED,
+            UVM_PMM_ROOT_LIST_EVICTION,
+            UVM_PMM_ROOT_LIST_NONE,
+            UVM_PMM_ROOT_LIST_LAZY_FREE,
+        };
+        uvm_pmm_root_list_op_t operations[] = {
+            UVM_PMM_ROOT_LIST_OP_MOVE_TAIL,
+            UVM_PMM_ROOT_LIST_OP_MOVE_TAIL,
+            UVM_PMM_ROOT_LIST_OP_DEL_INIT,
+            UVM_PMM_ROOT_LIST_OP_INIT,
+            UVM_PMM_ROOT_LIST_OP_ADD_TAIL,
+        };
+        size_t i;
+
+        for (i = 0; i < ARRAY_SIZE(states); ++i) {
+            pmm_bpf_test_place(pmm, root, heads[i], states[i], operations[i]);
+            pmm_bpf_test_init_decision(&decision, pmm, root);
+            nv_gpu_transition_record_pmm(&decision.request,
+                                         NV_GPU_PMM_DESTINATION_USED,
+                                         NV_GPU_PMM_POSITION_HEAD);
+            entry = pmm_bpf_test_snapshot(root);
+            if (pmm_bpf_test_access(pmm,
+                                    root,
+                                    &decision,
+                                    UVM_BPF_ACTION_DEFAULT,
+                                    &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                                    UVM_PMM_ROOT_LIST_VA_BLOCK_USED) != NV_GPU_PMM_ACCESS_PRESERVE ||
+                !pmm_bpf_test_snapshot_matches(root, &entry))
+                return false;
+        }
+    }
+
+    // Activate runs after the native move: absent/invalid requests preserve it.
+    pmm_bpf_test_place(pmm,
+                       root,
+                       &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                       UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                       UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    entry = pmm_bpf_test_snapshot(root);
+    if (uvm_pmm_bpf_apply_activate_locked(pmm, &root->chunk, &decision) !=
+            NV_GPU_TRANSITION_NOOP_DEFAULT ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    if (uvm_pmm_bpf_apply_activate_locked(pmm, &root->chunk, &decision) !=
+            NV_GPU_TRANSITION_APPLY ||
+        !pmm_bpf_test_is_head(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED], root))
+        return false;
+
+    pmm_bpf_test_init_decision(&decision, pmm, root);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_TAIL);
+    nv_gpu_transition_record_pmm(&decision.request,
+                                 NV_GPU_PMM_DESTINATION_UNUSED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    entry = pmm_bpf_test_snapshot(root);
+    if (uvm_pmm_bpf_apply_activate_locked(pmm, &root->chunk, &decision) !=
+            NV_GPU_TRANSITION_NOOP_CONFLICT ||
+        !pmm_bpf_test_snapshot_matches(root, &entry))
+        return false;
+
+    // Keep both real root aliases live through the end of the test.
+    return peer->list_state == UVM_PMM_ROOT_LIST_VA_BLOCK_USED;
+}
+
+NV_STATUS uvm_test_pmm_bpf_transition(UVM_TEST_PMM_BPF_TRANSITION_PARAMS *params, struct file *filp)
+{
+    NV_STATUS status = NV_OK;
+    uvm_gpu_t *gpu = NULL;
+    uvm_gpu_t *foreign_gpu = NULL;
+    uvm_pmm_gpu_t *pmm = NULL;
+    uvm_pmm_gpu_t *foreign_pmm = NULL;
+    size_t i;
+
+    (void)filp;
+    params->rmStatus = NV_OK;
+
+    gpu = uvm_kvmalloc_zero(sizeof(*gpu));
+    foreign_gpu = uvm_kvmalloc_zero(sizeof(*foreign_gpu));
+    if (!gpu || !foreign_gpu) {
+        status = NV_ERR_NO_MEMORY;
+        goto out;
+    }
+
+    pmm = &gpu->pmm;
+    foreign_pmm = &foreign_gpu->pmm;
+    gpu->mem_info.max_allocatable_address = 2 * UVM_CHUNK_SIZE_MAX - 1;
+    foreign_gpu->mem_info.max_allocatable_address = UVM_CHUNK_SIZE_MAX - 1;
+    pmm->root_chunks.count = 2;
+    foreign_pmm->root_chunks.count = 1;
+    pmm->root_chunks.array = uvm_kvmalloc_zero(2 * sizeof(*pmm->root_chunks.array));
+    foreign_pmm->root_chunks.array = uvm_kvmalloc_zero(sizeof(*foreign_pmm->root_chunks.array));
+    if (!pmm->root_chunks.array || !foreign_pmm->root_chunks.array) {
+        status = NV_ERR_NO_MEMORY;
+        goto out;
+    }
+
+    uvm_spin_lock_init(&pmm->list_lock, UVM_LOCK_ORDER_LEAF);
+    uvm_spin_lock_init(&foreign_pmm->list_lock, UVM_LOCK_ORDER_LEAF);
+    INIT_LIST_HEAD(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
+    INIT_LIST_HEAD(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED]);
+    INIT_LIST_HEAD(&pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_DISCARDED]);
+    INIT_LIST_HEAD(&pmm->root_chunks.va_block_lazy_free);
+    INIT_LIST_HEAD(&pmm->free_list[UVM_PMM_GPU_MEMORY_TYPE_USER][0][UVM_PMM_LIST_ZERO]);
+    INIT_LIST_HEAD(&foreign_pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
+    INIT_LIST_HEAD(&foreign_pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED]);
+    INIT_LIST_HEAD(&foreign_pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_DISCARDED]);
+    INIT_LIST_HEAD(&foreign_pmm->root_chunks.va_block_lazy_free);
+
+    uvm_spin_lock(&pmm->list_lock);
+    for (i = 0; i < pmm->root_chunks.count; ++i) {
+        uvm_gpu_root_chunk_t *root = &pmm->root_chunks.array[i];
+
+        root->chunk.address = i * UVM_CHUNK_SIZE_MAX;
+        root->chunk.type = UVM_PMM_GPU_MEMORY_TYPE_USER;
+        root->chunk.state = UVM_PMM_GPU_CHUNK_STATE_ALLOCATED;
+        uvm_gpu_chunk_set_size(&root->chunk, UVM_CHUNK_SIZE_MAX);
+        pmm_bpf_test_place(pmm,
+                           root,
+                           NULL,
+                           UVM_PMM_ROOT_LIST_NONE,
+                           UVM_PMM_ROOT_LIST_OP_INIT);
+        pmm_bpf_test_place(pmm,
+                           root,
+                           &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                           UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                           UVM_PMM_ROOT_LIST_OP_ADD_TAIL);
+    }
+    uvm_spin_unlock(&pmm->list_lock);
+
+    uvm_spin_lock(&foreign_pmm->list_lock);
+    foreign_pmm->root_chunks.array[0].chunk.address = 0;
+    foreign_pmm->root_chunks.array[0].chunk.type = UVM_PMM_GPU_MEMORY_TYPE_USER;
+    foreign_pmm->root_chunks.array[0].chunk.state = UVM_PMM_GPU_CHUNK_STATE_ALLOCATED;
+    uvm_gpu_chunk_set_size(&foreign_pmm->root_chunks.array[0].chunk, UVM_CHUNK_SIZE_MAX);
+    pmm_bpf_test_place(foreign_pmm,
+                       &foreign_pmm->root_chunks.array[0],
+                       NULL,
+                       UVM_PMM_ROOT_LIST_NONE,
+                       UVM_PMM_ROOT_LIST_OP_INIT);
+    pmm_bpf_test_place(foreign_pmm,
+                       &foreign_pmm->root_chunks.array[0],
+                       &foreign_pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                       UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                       UVM_PMM_ROOT_LIST_OP_ADD_TAIL);
+    uvm_spin_unlock(&foreign_pmm->list_lock);
+
+    uvm_spin_lock(&pmm->list_lock);
+    if (!pmm_bpf_test_run_locked(pmm,
+                                 pmm->root_chunks.array,
+                                 foreign_pmm,
+                                 &foreign_pmm->root_chunks.array[0]))
+        status = NV_ERR_INVALID_STATE;
+    uvm_spin_unlock(&pmm->list_lock);
+
+out:
+    if (status != NV_OK)
+        on_uvm_test_fail();
+    if (pmm && pmm->root_chunks.array)
+        uvm_kvfree(pmm->root_chunks.array);
+    if (foreign_pmm && foreign_pmm->root_chunks.array)
+        uvm_kvfree(foreign_pmm->root_chunks.array);
+    uvm_kvfree(gpu);
+    uvm_kvfree(foreign_gpu);
+    params->rmStatus = status;
     return status;
 }
