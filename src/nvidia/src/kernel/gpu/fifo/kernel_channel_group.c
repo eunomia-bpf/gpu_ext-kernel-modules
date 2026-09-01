@@ -183,29 +183,6 @@ kchangrpInit_IMPL
     pKernelChannelGroup->grpID = grpID;
     pKernelChannelGroup->timesliceUs = kfifoChannelGroupGetDefaultTimeslice_HAL(pKernelFifo);
 
-    // eBPF hook: task_init - TSG creation
-    {
-        NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
-        struct nv_gpu_task_init_ctx ctx = {0};
-        ctx.tsg_id = pKernelChannelGroup->grpID;
-        ctx.engine_type = pKernelChannelGroup->engineType;
-        ctx.default_timeslice = pKernelChannelGroup->timesliceUs;
-        ctx.default_interleave = pKernelChannelGroup->pInterleaveLevel[subdevInst];
-        ctx.runlist_id = runlistId;
-        ctx.timeslice = 0;
-        ctx.interleave_level = 0;
-        nv_gpu_sched_task_init(&ctx);
-        // Apply eBPF decisions if any
-        if (ctx.timeslice != 0)
-        {
-            pKernelChannelGroup->timesliceUs = ctx.timeslice;
-        }
-        if (ctx.interleave_level != 0)
-        {
-            pKernelChannelGroup->pInterleaveLevel[subdevInst] = ctx.interleave_level;
-        }
-    }
-
     NV_ASSERT_OK_OR_GOTO(status,
         kfifoChannelGroupSetTimeslice(pGpu, pKernelFifo, pKernelChannelGroup,
             pKernelChannelGroup->timesliceUs, NV_TRUE),
@@ -803,7 +780,6 @@ kchangrpGetEngineContextMemDesc_IMPL
 
     return NV_OK;
 }
-
 FIFO_TSG_INFO kchangrpGetInfo_IMPL(KernelChannelGroup *pKernelChannelGroup)
 {
     return (FIFO_TSG_INFO){pKernelChannelGroup->grpID, pKernelChannelGroup->runlistId};

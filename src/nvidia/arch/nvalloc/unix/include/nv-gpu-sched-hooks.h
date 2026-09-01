@@ -27,6 +27,7 @@
 #define _NV_GPU_SCHED_HOOKS_H_
 
 #include "nvtypes.h"
+#include "nv-gpu-transition-validator.h"
 
 /*
  * ============================================================================
@@ -40,21 +41,13 @@
 /*
  * Hook 1: task_init context - TSG creation
  *
- * Called from: kchangrpInit_IMPL() in kernel_channel_group.c
+ * Called from: kchangrpapiConstruct_IMPL() after native defaults are set
  * Timing: Once when a TSG (channel group) is created
  *
  * This is the point where scheduling parameters are initially set.
- * BPF can modify timeslice and interleave_level to customize scheduling.
+ * BPF can request timeslice and interleave changes through kfuncs.
  */
-struct nv_gpu_task_init_ctx {
-    NvU64 tsg_id;               /* TSG ID (grpID) */
-    NvU32 engine_type;          /* Engine type (GRAPHICS=0, COPY=1, NVDEC=2, NVENC=3, NVJPEG=4) */
-    NvU64 default_timeslice;    /* Default timeslice in microseconds */
-    NvU32 default_interleave;   /* Default interleave level (LOW=1, MEDIUM=2, HIGH=3) */
-    NvU32 runlist_id;           /* Runlist ID */
-    NvU64 timeslice;            /* Output: New timeslice (0 = no change) */
-    NvU32 interleave_level;     /* Output: New interleave level (0 = no change) */
-};
+/* The task-init and internal decision contexts live in the shared validator. */
 
 /*
  * Hook 2: bind context - TSG bind to hardware runlist
@@ -65,7 +58,8 @@ struct nv_gpu_task_init_ctx {
  * This is a ONE-TIME operation that binds a TSG into the hardware's scheduling runlist.
  * After this, kernel launches go directly through GPFIFO without calling this hook.
  *
- * BPF can set allow=0 to reject binding (returns NV_ERR_BUSY_RETRY).
+ * BPF can reject binding through bpf_nv_gpu_reject_bind()
+ * (returns NV_ERR_BUSY_RETRY).
  * This is useful for admission control (e.g., limiting which processes can use GPU),
  * but NOT for per-kernel rate limiting.
  */

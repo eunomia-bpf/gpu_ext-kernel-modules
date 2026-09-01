@@ -48,6 +48,28 @@
 
 #include "nv-gpu-sched-hooks.h"  // GPU scheduler eBPF hook functions
 
+#define NV_GPU_SCHED_PHASE_DEFAULTS_READY 1U
+
+static NvBool
+_kchangrpapiPolicyValueApplies(enum nv_gpu_transition_result result)
+{
+    switch (result)
+    {
+        case NV_GPU_TRANSITION_APPLY:
+            return NV_TRUE;
+        case NV_GPU_TRANSITION_NOOP_DEFAULT:
+        case NV_GPU_TRANSITION_NOOP_REPEAT:
+        case NV_GPU_TRANSITION_NOOP_STALE:
+        case NV_GPU_TRANSITION_NOOP_CONFLICT:
+        case NV_GPU_TRANSITION_REJECT_ACTION:
+        case NV_GPU_TRANSITION_REJECT_RANGE:
+        case NV_GPU_TRANSITION_REJECT_IDENTITY:
+            return NV_FALSE;
+    }
+
+    return NV_FALSE;
+}
+
 NV_STATUS
 kchangrpapiConstruct_IMPL
 (
@@ -299,6 +321,61 @@ kchangrpapiConstruct_IMPL
         kchangrpSetInterleaveLevel(pGpu, pKernelChannelGroup,
                                    NVA06C_CTRL_INTERLEAVE_LEVEL_MEDIUM),
         failed);
+
+    // eBPF task-init policy: native defaults are stable before observation.
+    {
+        NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
+        struct nv_gpu_task_init_decision_ctx decision = {0};
+        nv_gpu_scheduler_snapshot_t expected = {
+            .tsg_id = pKernelChannelGroup->grpID,
+            .runlist_id = pKernelChannelGroup->runlistId,
+            .phase = NV_GPU_SCHED_PHASE_DEFAULTS_READY,
+        };
+        nv_gpu_scheduler_snapshot_t observed;
+        nv_gpu_scheduler_validation_t validation;
+
+        decision.input.tsg_id = expected.tsg_id;
+        decision.input.engine_type = pKernelChannelGroup->engineType;
+        decision.input.default_timeslice = pKernelChannelGroup->timesliceUs;
+        decision.input.default_interleave = pKernelChannelGroup->pInterleaveLevel[subdevInst];
+        decision.input.runlist_id = expected.runlist_id;
+
+        nv_gpu_sched_task_init(&decision.input);
+
+        observed.tsg_id = pKernelChannelGroup->grpID;
+        observed.runlist_id = pKernelChannelGroup->runlistId;
+        observed.phase = NV_GPU_SCHED_PHASE_DEFAULTS_READY;
+        validation = nv_gpu_transition_validate_scheduler(
+            &expected,
+            &observed,
+            pKernelChannelGroup->timesliceUs,
+            pKernelChannelGroup->pInterleaveLevel[subdevInst],
+            kfifoRunlistGetMinTimeSlice_HAL(pKernelFifo),
+            &decision.timeslice_request,
+            &decision.interleave_request);
+
+        if (_kchangrpapiPolicyValueApplies(validation.timeslice_result))
+        {
+            NV_ASSERT_OK_OR_GOTO(
+                rmStatus,
+                kfifoChannelGroupSetTimeslice(pGpu,
+                                              pKernelFifo,
+                                              pKernelChannelGroup,
+                                              validation.timeslice,
+                                              NV_TRUE),
+                failed);
+        }
+
+        if (_kchangrpapiPolicyValueApplies(validation.interleave_result))
+        {
+            NV_ASSERT_OK_OR_GOTO(
+                rmStatus,
+                kchangrpSetInterleaveLevel(pGpu,
+                                           pKernelChannelGroup,
+                                           validation.interleave),
+                failed);
+        }
+    }
 
     ConfidentialCompute *pConfCompute = GPU_GET_CONF_COMPUTE(pGpu);
     MemoryManager *pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
@@ -1457,4 +1534,3 @@ kchangrpapiCtrlCmdGetInterleaveLevel_IMPL
 
     return NV_OK;
 }
-
