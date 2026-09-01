@@ -1228,6 +1228,14 @@ typedef struct
     NV_STATUS                       rmStatus;                                           // Out
 } UVM_TEST_PMM_QUERY_PMA_STATS_PARAMS;
 
+// Exercise PMM BPF transition validation with kernel-native locks, list heads,
+// root metadata, aliases, and callback-local request records.
+#define UVM_TEST_PMM_BPF_TRANSITION                      UVM_TEST_IOCTL_BASE(77)
+typedef struct
+{
+    NV_STATUS                       rmStatus;                                           // Out
+} UVM_TEST_PMM_BPF_TRANSITION_PARAMS;
+
 // Test whether the bottom halves have run on the correct CPUs based on the
 // NUMA node locality of the GPU.
 //
