@@ -46,6 +46,19 @@ enum nv_gpu_pmm_access_effect
     NV_GPU_PMM_ACCESS_COMMIT,
 };
 
+enum nv_gpu_prefetch_initial_effect
+{
+    NV_GPU_PREFETCH_INITIAL_NATIVE = 0,
+    NV_GPU_PREFETCH_INITIAL_BYPASS,
+    NV_GPU_PREFETCH_INITIAL_ITERATE,
+};
+
+enum nv_gpu_prefetch_iterator_effect
+{
+    NV_GPU_PREFETCH_ITERATOR_IGNORE = 0,
+    NV_GPU_PREFETCH_ITERATOR_COMMIT,
+};
+
 typedef struct
 {
     NvBool attempted;
@@ -237,7 +250,7 @@ nv_gpu_transition_record_prefetch(nv_gpu_prefetch_decision_t *decision,
 }
 
 static inline enum nv_gpu_transition_result
-nv_gpu_transition_validate_action(NvS64 raw_action, NvU32 *action)
+nv_gpu_transition_validate_initial_action(NvS64 raw_action, NvU32 *action)
 {
     *action = NV_GPU_TRANSITION_ACTION_DEFAULT;
 
@@ -247,6 +260,58 @@ nv_gpu_transition_validate_action(NvS64 raw_action, NvU32 *action)
 
     *action = (NvU32)raw_action;
     return NV_GPU_TRANSITION_APPLY;
+}
+
+static inline enum nv_gpu_transition_result
+nv_gpu_transition_validate_iterator_action(NvS64 raw_action, NvU32 *action)
+{
+    *action = NV_GPU_TRANSITION_ACTION_DEFAULT;
+
+    if ((raw_action != NV_GPU_TRANSITION_ACTION_DEFAULT) &&
+        (raw_action != NV_GPU_TRANSITION_ACTION_BYPASS))
+        return NV_GPU_TRANSITION_REJECT_ACTION;
+
+    *action = (NvU32)raw_action;
+    return NV_GPU_TRANSITION_APPLY;
+}
+
+static inline enum nv_gpu_prefetch_initial_effect
+nv_gpu_transition_prefetch_initial_effect(
+    NvS64 raw_action,
+    enum nv_gpu_transition_result region_result)
+{
+    NvU32 action;
+
+    if (nv_gpu_transition_validate_initial_action(raw_action, &action) !=
+        NV_GPU_TRANSITION_APPLY)
+        return NV_GPU_PREFETCH_INITIAL_NATIVE;
+
+    if (action == NV_GPU_TRANSITION_ACTION_ENTER_LOOP)
+        return NV_GPU_PREFETCH_INITIAL_ITERATE;
+
+    if ((action == NV_GPU_TRANSITION_ACTION_BYPASS) &&
+        (region_result == NV_GPU_TRANSITION_APPLY))
+        return NV_GPU_PREFETCH_INITIAL_BYPASS;
+
+    return NV_GPU_PREFETCH_INITIAL_NATIVE;
+}
+
+static inline enum nv_gpu_prefetch_iterator_effect
+nv_gpu_transition_prefetch_iterator_effect(
+    NvS64 raw_action,
+    enum nv_gpu_transition_result region_result)
+{
+    NvU32 action;
+
+    if (nv_gpu_transition_validate_iterator_action(raw_action, &action) !=
+        NV_GPU_TRANSITION_APPLY)
+        return NV_GPU_PREFETCH_ITERATOR_IGNORE;
+
+    if ((action == NV_GPU_TRANSITION_ACTION_BYPASS) &&
+        (region_result == NV_GPU_TRANSITION_APPLY))
+        return NV_GPU_PREFETCH_ITERATOR_COMMIT;
+
+    return NV_GPU_PREFETCH_ITERATOR_IGNORE;
 }
 
 static inline enum nv_gpu_transition_result
