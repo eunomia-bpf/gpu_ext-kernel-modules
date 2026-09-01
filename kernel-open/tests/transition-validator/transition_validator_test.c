@@ -33,6 +33,8 @@ static void test_scheduler_presence_and_minimum(void)
                                                   10, &timeslice, &interleave);
     EXPECT(result.timeslice_result == NV_GPU_TRANSITION_NOOP_DEFAULT);
     EXPECT(result.timeslice == 100);
+    EXPECT(result.interleave_result == NV_GPU_TRANSITION_NOOP_DEFAULT);
+    EXPECT(result.interleave == 1);
 
     EXPECT(nv_gpu_transition_record_u64(&timeslice, 0) == NV_GPU_TRANSITION_APPLY);
     result = nv_gpu_transition_validate_scheduler(&snapshot, &snapshot, 100, 1,
@@ -146,6 +148,49 @@ static void test_scheduler_repeat_and_conflict(void)
                                                   10, &timeslice, &interleave);
     EXPECT(result.timeslice_result == NV_GPU_TRANSITION_NOOP_CONFLICT);
     EXPECT(result.timeslice == 100);
+
+    EXPECT(nv_gpu_transition_record_u32(&interleave, 0) == NV_GPU_TRANSITION_APPLY);
+    EXPECT(nv_gpu_transition_record_u32(&interleave, 0) ==
+           NV_GPU_TRANSITION_NOOP_REPEAT);
+    result = nv_gpu_transition_validate_scheduler(&snapshot, &snapshot, 100, 1,
+                                                  10, &timeslice, &interleave);
+    EXPECT(result.interleave_result == NV_GPU_TRANSITION_APPLY);
+    EXPECT(result.interleave == 0);
+
+    EXPECT(nv_gpu_transition_record_u32(&interleave, 2) ==
+           NV_GPU_TRANSITION_NOOP_CONFLICT);
+    result = nv_gpu_transition_validate_scheduler(&snapshot, &snapshot, 100, 1,
+                                                  10, &timeslice, &interleave);
+    EXPECT(result.interleave_result == NV_GPU_TRANSITION_NOOP_CONFLICT);
+    EXPECT(result.interleave == 1);
+}
+
+static void test_scheduler_independent_fields(void)
+{
+    const nv_gpu_scheduler_snapshot_t snapshot = { 17, 3, 1 };
+    nv_gpu_transition_u64_request_t timeslice = { 0 };
+    nv_gpu_transition_u32_request_t interleave = { 0 };
+    nv_gpu_scheduler_validation_t result;
+
+    nv_gpu_transition_record_u64(&timeslice, 9);
+    nv_gpu_transition_record_u32(&interleave, 2);
+    result = nv_gpu_transition_validate_scheduler(&snapshot, &snapshot, 100, 1,
+                                                  10, &timeslice, &interleave);
+    EXPECT(result.timeslice_result == NV_GPU_TRANSITION_REJECT_RANGE);
+    EXPECT(result.timeslice == 100);
+    EXPECT(result.interleave_result == NV_GPU_TRANSITION_APPLY);
+    EXPECT(result.interleave == 2);
+
+    timeslice = (nv_gpu_transition_u64_request_t){ 0 };
+    interleave = (nv_gpu_transition_u32_request_t){ 0 };
+    nv_gpu_transition_record_u64(&timeslice, 20);
+    nv_gpu_transition_record_u32(&interleave, 3);
+    result = nv_gpu_transition_validate_scheduler(&snapshot, &snapshot, 100, 1,
+                                                  10, &timeslice, &interleave);
+    EXPECT(result.timeslice_result == NV_GPU_TRANSITION_APPLY);
+    EXPECT(result.timeslice == 20);
+    EXPECT(result.interleave_result == NV_GPU_TRANSITION_REJECT_RANGE);
+    EXPECT(result.interleave == 1);
 }
 
 static void test_prefetch_action(void)
@@ -155,20 +200,62 @@ static void test_prefetch_action(void)
 
     for (raw = 0; raw <= 2; ++raw)
     {
-        EXPECT(nv_gpu_transition_validate_action(raw, &action) ==
+        EXPECT(nv_gpu_transition_validate_initial_action(raw, &action) ==
                NV_GPU_TRANSITION_APPLY);
         EXPECT(action == (NvU32)raw);
     }
 
-    EXPECT(nv_gpu_transition_validate_action(-1, &action) ==
+    EXPECT(nv_gpu_transition_validate_initial_action(-1, &action) ==
            NV_GPU_TRANSITION_REJECT_ACTION);
     EXPECT(action == NV_GPU_TRANSITION_ACTION_DEFAULT);
-    EXPECT(nv_gpu_transition_validate_action(3, &action) ==
+    EXPECT(nv_gpu_transition_validate_initial_action(3, &action) ==
            NV_GPU_TRANSITION_REJECT_ACTION);
     EXPECT(action == NV_GPU_TRANSITION_ACTION_DEFAULT);
-    EXPECT(nv_gpu_transition_validate_action(2147483647, &action) ==
+    EXPECT(nv_gpu_transition_validate_initial_action(2147483647, &action) ==
            NV_GPU_TRANSITION_REJECT_ACTION);
     EXPECT(action == NV_GPU_TRANSITION_ACTION_DEFAULT);
+
+    EXPECT(nv_gpu_transition_validate_iterator_action(
+               NV_GPU_TRANSITION_ACTION_DEFAULT, &action) ==
+           NV_GPU_TRANSITION_APPLY);
+    EXPECT(nv_gpu_transition_validate_iterator_action(
+               NV_GPU_TRANSITION_ACTION_BYPASS, &action) ==
+           NV_GPU_TRANSITION_APPLY);
+    EXPECT(nv_gpu_transition_validate_iterator_action(
+               NV_GPU_TRANSITION_ACTION_ENTER_LOOP, &action) ==
+           NV_GPU_TRANSITION_REJECT_ACTION);
+    EXPECT(action == NV_GPU_TRANSITION_ACTION_DEFAULT);
+}
+
+static void test_prefetch_action_region_routing(void)
+{
+    EXPECT(nv_gpu_transition_prefetch_initial_effect(
+               NV_GPU_TRANSITION_ACTION_DEFAULT,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_INITIAL_NATIVE);
+    EXPECT(nv_gpu_transition_prefetch_initial_effect(
+               NV_GPU_TRANSITION_ACTION_BYPASS,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_INITIAL_BYPASS);
+    EXPECT(nv_gpu_transition_prefetch_initial_effect(
+               NV_GPU_TRANSITION_ACTION_BYPASS,
+               NV_GPU_TRANSITION_REJECT_RANGE) == NV_GPU_PREFETCH_INITIAL_NATIVE);
+    EXPECT(nv_gpu_transition_prefetch_initial_effect(
+               NV_GPU_TRANSITION_ACTION_ENTER_LOOP,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_INITIAL_ITERATE);
+    EXPECT(nv_gpu_transition_prefetch_initial_effect(
+               99, NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_INITIAL_NATIVE);
+
+    EXPECT(nv_gpu_transition_prefetch_iterator_effect(
+               NV_GPU_TRANSITION_ACTION_DEFAULT,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_ITERATOR_IGNORE);
+    EXPECT(nv_gpu_transition_prefetch_iterator_effect(
+               NV_GPU_TRANSITION_ACTION_BYPASS,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_ITERATOR_COMMIT);
+    EXPECT(nv_gpu_transition_prefetch_iterator_effect(
+               NV_GPU_TRANSITION_ACTION_BYPASS,
+               NV_GPU_TRANSITION_REJECT_RANGE) == NV_GPU_PREFETCH_ITERATOR_IGNORE);
+    EXPECT(nv_gpu_transition_prefetch_iterator_effect(
+               NV_GPU_TRANSITION_ACTION_ENTER_LOOP,
+               NV_GPU_TRANSITION_APPLY) == NV_GPU_PREFETCH_ITERATOR_IGNORE);
 }
 
 static void test_prefetch_region_and_width(void)
@@ -223,20 +310,20 @@ static void test_prefetch_region_and_width(void)
 
     decision = (nv_gpu_prefetch_decision_t){ 0 };
     nv_gpu_transition_record_prefetch(&decision, 10, type_outer + 1);
-    EXPECT(nv_gpu_transition_validate_region(&decision, 10, type_outer + 1,
-                                             type_outer + 1, type_outer,
+    EXPECT(nv_gpu_transition_validate_region(&decision, 10, 20, 512,
+                                             type_outer,
                                              &region) ==
            NV_GPU_TRANSITION_REJECT_RANGE);
 
     decision = (nv_gpu_prefetch_decision_t){ 0 };
     nv_gpu_transition_record_prefetch(&decision, 10, ~(NvU64)0);
-    EXPECT(nv_gpu_transition_validate_region(&decision, 10, ~(NvU64)0,
+    EXPECT(nv_gpu_transition_validate_region(&decision, 10, 20,
                                              512, type_outer, &region) ==
            NV_GPU_TRANSITION_REJECT_RANGE);
 
     decision = (nv_gpu_prefetch_decision_t){ 0 };
     nv_gpu_transition_record_prefetch(&decision, 10, 513);
-    EXPECT(nv_gpu_transition_validate_region(&decision, 10, 513, 512,
+    EXPECT(nv_gpu_transition_validate_region(&decision, 10, 20, 512,
                                              type_outer, &region) ==
            NV_GPU_TRANSITION_REJECT_RANGE);
 }
@@ -315,6 +402,53 @@ static void test_pmm_attempt_latching(void)
            NV_GPU_TRANSITION_NOOP_CONFLICT);
 }
 
+static void expect_pmm_preserve_for_both_actions(
+    enum nv_gpu_transition_result result)
+{
+    EXPECT(nv_gpu_transition_pmm_access_effect(
+               NV_GPU_TRANSITION_ACTION_DEFAULT, result) ==
+           NV_GPU_PMM_ACCESS_PRESERVE);
+    EXPECT(nv_gpu_transition_pmm_access_effect(
+               NV_GPU_TRANSITION_ACTION_BYPASS, result) ==
+           NV_GPU_PMM_ACCESS_PRESERVE);
+}
+
+static void test_pmm_rejected_attempt_sequences(void)
+{
+    const nv_gpu_pmm_snapshot_t snapshot = { 1, 2, 3,
+                                             NV_GPU_PMM_DESTINATION_USED };
+    nv_gpu_pmm_request_t request = { 0 };
+    enum nv_gpu_transition_result result;
+
+    nv_gpu_transition_record_pmm(&request, 99, NV_GPU_PMM_POSITION_HEAD);
+    result = nv_gpu_transition_validate_pmm(&snapshot, &snapshot, &request);
+    EXPECT(result == NV_GPU_TRANSITION_REJECT_RANGE);
+    expect_pmm_preserve_for_both_actions(result);
+
+    EXPECT(nv_gpu_transition_record_pmm(&request, 99,
+                                        NV_GPU_PMM_POSITION_HEAD) ==
+           NV_GPU_TRANSITION_NOOP_REPEAT);
+    result = nv_gpu_transition_validate_pmm(&snapshot, &snapshot, &request);
+    EXPECT(result == NV_GPU_TRANSITION_REJECT_RANGE);
+    expect_pmm_preserve_for_both_actions(result);
+
+    request = (nv_gpu_pmm_request_t){ 0 };
+    nv_gpu_transition_record_pmm(&request, NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    nv_gpu_transition_record_pmm(&request, 99, NV_GPU_PMM_POSITION_HEAD);
+    result = nv_gpu_transition_validate_pmm(&snapshot, &snapshot, &request);
+    EXPECT(result == NV_GPU_TRANSITION_NOOP_CONFLICT);
+    expect_pmm_preserve_for_both_actions(result);
+
+    request = (nv_gpu_pmm_request_t){ 0 };
+    nv_gpu_transition_record_pmm(&request, 99, NV_GPU_PMM_POSITION_HEAD);
+    nv_gpu_transition_record_pmm(&request, NV_GPU_PMM_DESTINATION_USED,
+                                 NV_GPU_PMM_POSITION_HEAD);
+    result = nv_gpu_transition_validate_pmm(&snapshot, &snapshot, &request);
+    EXPECT(result == NV_GPU_TRANSITION_NOOP_CONFLICT);
+    expect_pmm_preserve_for_both_actions(result);
+}
+
 static void test_pmm_snapshot_and_routing(void)
 {
     const nv_gpu_pmm_snapshot_t expected = { 1, 2, 3,
@@ -361,6 +495,13 @@ static void test_pmm_snapshot_and_routing(void)
            NV_GPU_PMM_ACCESS_PRESERVE);
 
     current = expected;
+    current.root_id = 9;
+    result = nv_gpu_transition_validate_pmm(&expected, &current, &request);
+    EXPECT(result == NV_GPU_TRANSITION_REJECT_IDENTITY);
+    EXPECT(nv_gpu_transition_pmm_activate_effect(result) ==
+           NV_GPU_PMM_ACCESS_PRESERVE);
+
+    current = expected;
     current.source = NV_GPU_PMM_DESTINATION_UNUSED;
     result = nv_gpu_transition_validate_pmm(&expected, &current, &request);
     EXPECT(result == NV_GPU_TRANSITION_NOOP_STALE);
@@ -389,10 +530,13 @@ static const struct test_case test_cases[] = {
     { "interleave-low-range", test_interleave_low_and_range },
     { "scheduler-identity-phase", test_scheduler_identity_and_phase },
     { "scheduler-repeat-conflict", test_scheduler_repeat_and_conflict },
+    { "scheduler-independent-fields", test_scheduler_independent_fields },
     { "prefetch-action", test_prefetch_action },
+    { "prefetch-action-region-routing", test_prefetch_action_region_routing },
     { "prefetch-region-width", test_prefetch_region_and_width },
     { "prefetch-translation", test_prefetch_translation },
     { "pmm-attempt-latching", test_pmm_attempt_latching },
+    { "pmm-rejected-attempt-sequences", test_pmm_rejected_attempt_sequences },
     { "pmm-snapshot-routing", test_pmm_snapshot_and_routing },
 };
 
