@@ -133,7 +133,11 @@ static void devmem_page_free_gpu_chunk(uvm_gpu_chunk_t *chunk)
     chunk->is_referenced = false;
 
     if (chunk->state == UVM_PMM_GPU_CHUNK_STATE_ALLOCATED) {
-        list_del_init(&chunk->list);
+        uvm_pmm_root_list_update_locked(&gpu->pmm,
+                                        chunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         uvm_pmm_gpu_chunk_pin(&gpu->pmm, chunk);
     }
     else {
@@ -141,7 +145,11 @@ static void devmem_page_free_gpu_chunk(uvm_gpu_chunk_t *chunk)
         UVM_ASSERT(list_empty(&chunk->list));
     }
 
-    list_add_tail(&chunk->list, &gpu->pmm.root_chunks.va_block_lazy_free);
+    uvm_pmm_root_list_update_locked(&gpu->pmm,
+                                    chunk,
+                                    &gpu->pmm.root_chunks.va_block_lazy_free,
+                                    UVM_PMM_ROOT_LIST_LAZY_FREE,
+                                    UVM_PMM_ROOT_LIST_OP_ADD_TAIL);
 
     spin_unlock(&gpu->pmm.list_lock.lock);
 

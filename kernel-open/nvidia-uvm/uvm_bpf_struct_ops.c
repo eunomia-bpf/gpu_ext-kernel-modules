@@ -50,12 +50,12 @@ struct gpu_mem_ops {
 	int (*gpu_block_activate)(
 		uvm_pmm_gpu_t *pmm,
 		uvm_gpu_chunk_t *chunk,
-		struct list_head *list);
+		uvm_bpf_pmm_decision_ctx_t *decision_ctx);
 
 	int (*gpu_block_access)(
 		uvm_pmm_gpu_t *pmm,
 		uvm_gpu_chunk_t *chunk,
-		struct list_head *list);
+		uvm_bpf_pmm_decision_ctx_t *decision_ctx);
 
 	int (*gpu_evict_prepare)(
 		uvm_pmm_gpu_t *pmm,
@@ -99,7 +99,7 @@ static int gpu_mem_ops__gpu_page_prefetch_iter(
 static int gpu_mem_ops__gpu_block_activate(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
-	struct list_head *list)
+	uvm_bpf_pmm_decision_ctx_t *decision_ctx)
 {
 	return UVM_BPF_ACTION_DEFAULT;
 }
@@ -107,7 +107,7 @@ static int gpu_mem_ops__gpu_block_activate(
 static int gpu_mem_ops__gpu_block_access(
 	uvm_pmm_gpu_t *pmm,
 	uvm_gpu_chunk_t *chunk,
-	struct list_head *list)
+	uvm_bpf_pmm_decision_ctx_t *decision_ctx)
 {
 	return UVM_BPF_ACTION_DEFAULT;
 }
@@ -153,24 +153,17 @@ __bpf_kfunc int bpf_gpu_set_prefetch_region(uvm_bpf_prefetch_decision_t *decisio
 						 outer);
 }
 
-/* Move chunk to head of the list (makes it highest priority for eviction) */
-__bpf_kfunc void bpf_gpu_block_move_head(uvm_gpu_chunk_t *chunk,
-					     struct list_head *list)
+/* Record one callback-local PMM reorder request without mutating any list. */
+__bpf_kfunc int bpf_gpu_request_reorder(uvm_bpf_pmm_decision_ctx_t *decision_ctx,
+					u64 destination,
+					u64 position)
 {
-	if (!chunk || !list)
-		return;
+	if (!decision_ctx)
+		return NV_GPU_TRANSITION_REJECT_IDENTITY;
 
-	list_move(&chunk->list, list);
-}
-
-/* Move chunk to tail of the list (makes it lowest priority for eviction) */
-__bpf_kfunc void bpf_gpu_block_move_tail(uvm_gpu_chunk_t *chunk,
-					     struct list_head *list)
-{
-	if (!chunk || !list)
-		return;
-
-	list_move_tail(&chunk->list, list);
+	return nv_gpu_transition_record_pmm(&decision_ctx->request,
+					    destination,
+					    position);
 }
 
 /* End kfunc definitions */
@@ -180,8 +173,7 @@ __bpf_kfunc_end_defs();
 BTF_KFUNCS_START(uvm_bpf_kfunc_ids_set)
 BTF_ID_FLAGS(func, bpf_gpu_strstr)
 BTF_ID_FLAGS(func, bpf_gpu_set_prefetch_region, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_gpu_block_move_head, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_gpu_block_move_tail, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_gpu_request_reorder, KF_TRUSTED_ARGS)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -406,35 +398,47 @@ NvS64 uvm_bpf_call_gpu_page_prefetch_iter(
 /* PMM eviction policy hook wrappers */
 void uvm_bpf_call_gpu_block_activate(
 	uvm_pmm_gpu_t *pmm,
-	uvm_gpu_chunk_t *chunk,
-	struct list_head *list)
+	uvm_gpu_chunk_t *chunk)
 {
 	struct gpu_mem_ops *ops;
+	uvm_bpf_pmm_decision_ctx_t decision_ctx = {0};
 
+	decision_ctx.pmm = pmm;
+	decision_ctx.root_chunk = container_of(chunk, uvm_gpu_root_chunk_t, chunk);
+	decision_ctx.observed.owner_id = (NvU64)(unsigned long)pmm;
+	decision_ctx.observed.root_id = (NvU64)(unsigned long)decision_ctx.root_chunk;
+	decision_ctx.observed.generation = decision_ctx.root_chunk->list_generation;
+	decision_ctx.observed.source = decision_ctx.root_chunk->list_state;
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->gpu_block_activate) {
-		ops->gpu_block_activate(pmm, chunk, list);
-	}
+	if (ops && ops->gpu_block_activate)
+		ops->gpu_block_activate(pmm, chunk, &decision_ctx);
 	rcu_read_unlock();
+
+	uvm_pmm_bpf_apply_activate_locked(pmm, chunk, &decision_ctx);
 }
 
-enum uvm_bpf_action uvm_bpf_call_gpu_block_access(
+enum nv_gpu_pmm_access_effect uvm_bpf_call_gpu_block_access(
 	uvm_pmm_gpu_t *pmm,
-	uvm_gpu_chunk_t *chunk,
-	struct list_head *list)
+	uvm_gpu_chunk_t *chunk)
 {
 	struct gpu_mem_ops *ops;
-	int ret = UVM_BPF_ACTION_DEFAULT;
+	uvm_bpf_pmm_decision_ctx_t decision_ctx = {0};
+	NvS64 raw_action = UVM_BPF_ACTION_DEFAULT;
 
+	decision_ctx.pmm = pmm;
+	decision_ctx.root_chunk = container_of(chunk, uvm_gpu_root_chunk_t, chunk);
+	decision_ctx.observed.owner_id = (NvU64)(unsigned long)pmm;
+	decision_ctx.observed.root_id = (NvU64)(unsigned long)decision_ctx.root_chunk;
+	decision_ctx.observed.generation = decision_ctx.root_chunk->list_generation;
+	decision_ctx.observed.source = decision_ctx.root_chunk->list_state;
 	rcu_read_lock();
 	ops = rcu_dereference(uvm_ops);
-	if (ops && ops->gpu_block_access) {
-		ret = ops->gpu_block_access(pmm, chunk, list);
-	}
+	if (ops && ops->gpu_block_access)
+		raw_action = ops->gpu_block_access(pmm, chunk, &decision_ctx);
 	rcu_read_unlock();
 
-	return (enum uvm_bpf_action)ret;
+	return uvm_pmm_bpf_apply_access_locked(pmm, chunk, &decision_ctx, raw_action);
 }
 
 void uvm_bpf_call_gpu_evict_prepare(

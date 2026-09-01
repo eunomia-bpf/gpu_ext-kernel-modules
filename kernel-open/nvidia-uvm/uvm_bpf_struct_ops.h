@@ -11,6 +11,14 @@ typedef struct uvm_bpf_prefetch_decision
     nv_gpu_prefetch_decision_t request;
 } uvm_bpf_prefetch_decision_t;
 
+typedef struct uvm_bpf_pmm_decision_ctx
+{
+    uvm_pmm_gpu_t *pmm;
+    uvm_gpu_root_chunk_t *root_chunk;
+    nv_gpu_pmm_snapshot_t observed;
+    nv_gpu_pmm_request_t request;
+} uvm_bpf_pmm_decision_ctx_t;
+
 /* Action codes returned by BPF hooks */
 enum uvm_bpf_action {
     UVM_BPF_ACTION_DEFAULT = 0,       /* Use default kernel behavior */
@@ -39,13 +47,11 @@ NvS64 uvm_bpf_call_gpu_page_prefetch_iter(
 /* PMM eviction policy hook wrapper functions */
 void uvm_bpf_call_gpu_block_activate(
     uvm_pmm_gpu_t *pmm,
-    uvm_gpu_chunk_t *chunk,
-    struct list_head *list);
+    uvm_gpu_chunk_t *chunk);
 
-enum uvm_bpf_action uvm_bpf_call_gpu_block_access(
+enum nv_gpu_pmm_access_effect uvm_bpf_call_gpu_block_access(
     uvm_pmm_gpu_t *pmm,
-    uvm_gpu_chunk_t *chunk,
-    struct list_head *list);
+    uvm_gpu_chunk_t *chunk);
 
 void uvm_bpf_call_gpu_evict_prepare(
     uvm_pmm_gpu_t *pmm,

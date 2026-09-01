@@ -380,6 +380,169 @@ static bool chunk_is_root_chunk(uvm_gpu_chunk_t *chunk)
     return uvm_gpu_chunk_get_size(chunk) == UVM_CHUNK_SIZE_MAX;
 }
 
+void uvm_pmm_root_list_update_locked(uvm_pmm_gpu_t *pmm,
+                                     uvm_gpu_chunk_t *chunk,
+                                     struct list_head *destination,
+                                     uvm_pmm_root_list_state_t root_state,
+                                     uvm_pmm_root_list_op_t operation)
+{
+    uvm_gpu_root_chunk_t *root_chunk = NULL;
+
+    uvm_assert_spinlock_locked(&pmm->list_lock);
+
+    if (chunk_is_root_chunk(chunk)) {
+        root_chunk = root_chunk_from_chunk(pmm, chunk);
+        UVM_ASSERT(chunk == &root_chunk->chunk);
+        UVM_ASSERT(root_state >= UVM_PMM_ROOT_LIST_NONE &&
+                   root_state <= UVM_PMM_ROOT_LIST_LAZY_FREE);
+    }
+
+    switch (operation) {
+        case UVM_PMM_ROOT_LIST_OP_INIT:
+            UVM_ASSERT(destination == NULL);
+            INIT_LIST_HEAD(&chunk->list);
+            break;
+        case UVM_PMM_ROOT_LIST_OP_DEL_INIT:
+            UVM_ASSERT(destination == NULL);
+            list_del_init(&chunk->list);
+            break;
+        case UVM_PMM_ROOT_LIST_OP_ADD_TAIL:
+            UVM_ASSERT(destination != NULL);
+            list_add_tail(&chunk->list, destination);
+            break;
+        case UVM_PMM_ROOT_LIST_OP_MOVE_HEAD:
+            UVM_ASSERT(destination != NULL);
+            list_move(&chunk->list, destination);
+            break;
+        case UVM_PMM_ROOT_LIST_OP_MOVE_TAIL:
+            UVM_ASSERT(destination != NULL);
+            list_move_tail(&chunk->list, destination);
+            break;
+        default:
+            UVM_ASSERT(false);
+            return;
+    }
+
+    if (!root_chunk)
+        return;
+
+    if (root_chunk->list_state != root_state)
+        ++root_chunk->list_generation;
+    root_chunk->list_state = root_state;
+}
+
+static enum nv_gpu_transition_result
+pmm_bpf_validate_reorder_locked(uvm_pmm_gpu_t *pmm,
+                                uvm_gpu_chunk_t *chunk,
+                                uvm_bpf_pmm_decision_ctx_t *decision_ctx,
+                                struct list_head **destination,
+                                uvm_pmm_root_list_state_t *destination_state)
+{
+    uvm_gpu_root_chunk_t *root_chunk;
+    nv_gpu_pmm_snapshot_t observed_now;
+    enum nv_gpu_transition_result result;
+
+    uvm_assert_spinlock_locked(&pmm->list_lock);
+    *destination = NULL;
+    *destination_state = UVM_PMM_ROOT_LIST_NONE;
+
+    if (!decision_ctx || !chunk_is_root_chunk(chunk))
+        return NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+    root_chunk = root_chunk_from_chunk(pmm, chunk);
+    if (chunk != &root_chunk->chunk)
+        return NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+    observed_now.owner_id = (NvU64)(unsigned long)pmm;
+    observed_now.root_id = (NvU64)(unsigned long)root_chunk;
+    observed_now.generation = root_chunk->list_generation;
+    observed_now.source = root_chunk->list_state;
+
+    result = nv_gpu_transition_validate_pmm(&decision_ctx->observed,
+                                            &observed_now,
+                                            &decision_ctx->request);
+    if (result != NV_GPU_TRANSITION_APPLY)
+        return result;
+
+    if ((decision_ctx->pmm != pmm) || (decision_ctx->root_chunk != root_chunk))
+        return NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+    if ((root_chunk->list_state != UVM_PMM_ROOT_LIST_VA_BLOCK_USED) &&
+        (root_chunk->list_state != UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED))
+        return NV_GPU_TRANSITION_NOOP_STALE;
+
+    if (decision_ctx->request.destination == NV_GPU_PMM_DESTINATION_USED) {
+        *destination = &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED];
+        *destination_state = UVM_PMM_ROOT_LIST_VA_BLOCK_USED;
+    }
+    else {
+        *destination = &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_UNUSED];
+        *destination_state = UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED;
+    }
+
+    return NV_GPU_TRANSITION_APPLY;
+}
+
+static enum nv_gpu_transition_result
+pmm_bpf_commit_reorder_locked(uvm_pmm_gpu_t *pmm,
+                              uvm_gpu_chunk_t *chunk,
+                              uvm_bpf_pmm_decision_ctx_t *decision_ctx)
+{
+    struct list_head *destination;
+    uvm_pmm_root_list_state_t destination_state;
+    enum nv_gpu_transition_result result =
+        pmm_bpf_validate_reorder_locked(pmm, chunk, decision_ctx, &destination, &destination_state);
+
+    if (result != NV_GPU_TRANSITION_APPLY)
+        return result;
+
+    uvm_pmm_root_list_update_locked(pmm,
+                                    chunk,
+                                    destination,
+                                    destination_state,
+                                    decision_ctx->request.position == NV_GPU_PMM_POSITION_HEAD ?
+                                        UVM_PMM_ROOT_LIST_OP_MOVE_HEAD :
+                                        UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
+    return NV_GPU_TRANSITION_APPLY;
+}
+
+enum nv_gpu_pmm_access_effect
+uvm_pmm_bpf_apply_access_locked(uvm_pmm_gpu_t *pmm,
+                                uvm_gpu_chunk_t *chunk,
+                                uvm_bpf_pmm_decision_ctx_t *decision_ctx,
+                                NvS64 raw_action)
+{
+    struct list_head *destination;
+    uvm_pmm_root_list_state_t destination_state;
+    enum nv_gpu_transition_result result =
+        pmm_bpf_validate_reorder_locked(pmm, chunk, decision_ctx, &destination, &destination_state);
+    enum nv_gpu_pmm_access_effect effect = nv_gpu_transition_pmm_access_effect(raw_action, result);
+
+    if (effect == NV_GPU_PMM_ACCESS_COMMIT) {
+        result = pmm_bpf_commit_reorder_locked(pmm, chunk, decision_ctx);
+        if (result != NV_GPU_TRANSITION_APPLY)
+            return NV_GPU_PMM_ACCESS_PRESERVE;
+    }
+
+    return effect;
+}
+
+enum nv_gpu_transition_result
+uvm_pmm_bpf_apply_activate_locked(uvm_pmm_gpu_t *pmm,
+                                  uvm_gpu_chunk_t *chunk,
+                                  uvm_bpf_pmm_decision_ctx_t *decision_ctx)
+{
+    struct list_head *destination;
+    uvm_pmm_root_list_state_t destination_state;
+    enum nv_gpu_transition_result result =
+        pmm_bpf_validate_reorder_locked(pmm, chunk, decision_ctx, &destination, &destination_state);
+
+    if (nv_gpu_transition_pmm_activate_effect(result) == NV_GPU_PMM_ACCESS_COMMIT)
+        return pmm_bpf_commit_reorder_locked(pmm, chunk, decision_ctx);
+
+    return result;
+}
+
 static bool chunk_is_root_chunk_pinned(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
     uvm_gpu_root_chunk_t *root_chunk = root_chunk_from_chunk(pmm, chunk);
@@ -646,26 +809,40 @@ static void chunk_update_lists_locked(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
         if (chunk_is_root_chunk_pinned(pmm, chunk)) {
             UVM_ASSERT(root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_IS_SPLIT ||
                        root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED);
-            list_del_init(&root_chunk->chunk.list);
+            uvm_pmm_root_list_update_locked(pmm,
+                                            &root_chunk->chunk,
+                                            NULL,
+                                            UVM_PMM_ROOT_LIST_NONE,
+                                            UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         }
         else if (root_chunk->chunk.state != UVM_PMM_GPU_CHUNK_STATE_FREE) {
             UVM_ASSERT(root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_IS_SPLIT ||
                        root_chunk->chunk.state == UVM_PMM_GPU_CHUNK_STATE_ALLOCATED);
-            list_move_tail(&root_chunk->chunk.list, &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
+            uvm_pmm_root_list_update_locked(pmm,
+                                            &root_chunk->chunk,
+                                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED],
+                                            UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+                                            UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
 
             // Call BPF hook: chunk activated (became evictable)
             // Pass root_chunk, not the sub-chunk, since we moved root_chunk->chunk.list
-            uvm_bpf_call_gpu_block_activate(pmm,
-                                            &root_chunk->chunk,
-                                            &pmm->root_chunks.alloc_list[UVM_PMM_ALLOC_LIST_USED]);
+            uvm_bpf_call_gpu_block_activate(pmm, &root_chunk->chunk);
         }
     }
 
     // TODO: Bug 1757148: Improve fragmentation of split chunks
     if (chunk->state == UVM_PMM_GPU_CHUNK_STATE_FREE)
-        list_move_tail(&chunk->list, find_free_list_chunk(pmm, chunk));
+        uvm_pmm_root_list_update_locked(pmm,
+                                        chunk,
+                                        find_free_list_chunk(pmm, chunk),
+                                        UVM_PMM_ROOT_LIST_FREE,
+                                        UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
     else if (chunk->state == UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED)
-        list_del_init(&chunk->list);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        chunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
 }
 
 void uvm_pmm_gpu_unpin_allocated(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk, uvm_va_block_t *va_block)
@@ -1220,7 +1397,11 @@ static NV_STATUS pin_free_chunks_func(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk
     UVM_ASSERT(chunk_is_in_eviction(pmm, chunk));
 
     if (chunk->state == UVM_PMM_GPU_CHUNK_STATE_FREE) {
-        list_del_init(&chunk->list);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        chunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_EVICTION,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         chunk_pin(pmm, chunk);
         if (chunk->parent)
             chunk->parent->suballoc->allocated++;
@@ -1417,7 +1598,11 @@ static void chunk_start_eviction(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
     UVM_ASSERT(chunk_is_evictable(pmm, chunk));
     UVM_ASSERT(!list_empty(&chunk->list));
 
-    list_del_init(&chunk->list);
+    uvm_pmm_root_list_update_locked(pmm,
+                                    chunk,
+                                    NULL,
+                                    UVM_PMM_ROOT_LIST_EVICTION,
+                                    UVM_PMM_ROOT_LIST_OP_DEL_INIT);
     uvm_gpu_chunk_set_in_eviction(chunk, true);
     ++pmm->root_chunks.in_eviction_count;
 }
@@ -1425,12 +1610,18 @@ static void chunk_start_eviction(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm,
                                             uvm_gpu_chunk_t *chunk,
                                             uvm_pmm_alloc_list_t alloc_list,
-                                            enum uvm_bpf_action (*bpf_hook)(uvm_pmm_gpu_t *,
-                                                                            uvm_gpu_chunk_t *,
-                                                                            struct list_head *))
+                                            bool invoke_access_hook)
 {
     struct list_head *list = &pmm->root_chunks.alloc_list[alloc_list];
-    enum uvm_bpf_action action = UVM_BPF_ACTION_DEFAULT;
+    uvm_pmm_root_list_state_t destination_state;
+    enum nv_gpu_pmm_access_effect effect = NV_GPU_PMM_ACCESS_NATIVE;
+
+    if (alloc_list == UVM_PMM_ALLOC_LIST_USED)
+        destination_state = UVM_PMM_ROOT_LIST_VA_BLOCK_USED;
+    else if (alloc_list == UVM_PMM_ALLOC_LIST_UNUSED)
+        destination_state = UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED;
+    else
+        destination_state = UVM_PMM_ROOT_LIST_VA_BLOCK_DISCARDED;
 
     uvm_spin_lock(&pmm->list_lock);
 
@@ -1445,13 +1636,15 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm,
         UVM_ASSERT(!list_empty(&chunk->list));
 
         // Call BPF hook first to allow control over list operation
-        if (bpf_hook)
-            action = bpf_hook(pmm, chunk, list);
+        if (invoke_access_hook)
+            effect = uvm_bpf_call_gpu_block_access(pmm, chunk);
 
-        // Only move to tail if BPF doesn't bypass
-        if (action != UVM_BPF_ACTION_BYPASS) {
-            list_move_tail(&chunk->list, list);
-        }
+        if (effect == NV_GPU_PMM_ACCESS_NATIVE)
+            uvm_pmm_root_list_update_locked(pmm,
+                                            chunk,
+                                            list,
+                                            destination_state,
+                                            UVM_PMM_ROOT_LIST_OP_MOVE_TAIL);
     }
 
     uvm_spin_unlock(&pmm->list_lock);
@@ -1459,33 +1652,32 @@ static void root_chunk_update_eviction_list(uvm_pmm_gpu_t *pmm,
 
 void uvm_pmm_gpu_mark_root_chunk_used(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_USED,
-                                    uvm_bpf_call_gpu_block_access);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_USED, true);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_unused(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED, NULL);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_UNUSED, false);
 }
 
 void uvm_pmm_gpu_mark_root_chunk_discarded(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_DISCARDED, NULL);
+    root_chunk_update_eviction_list(pmm, chunk, UVM_PMM_ALLOC_LIST_DISCARDED, false);
 }
 
 static uvm_pmm_alloc_list_t get_alloc_list(uvm_pmm_gpu_t *pmm, uvm_gpu_chunk_t *chunk)
 {
-    uvm_pmm_alloc_list_t alloc_list;
+    uvm_gpu_root_chunk_t *root_chunk;
 
     uvm_assert_spinlock_locked(&pmm->list_lock);
+    root_chunk = root_chunk_from_chunk(pmm, chunk);
 
-    for (alloc_list = 0; alloc_list < UVM_PMM_ALLOC_LIST_COUNT; alloc_list++) {
-        uvm_gpu_chunk_t *entry;
-        list_for_each_entry(entry, &pmm->root_chunks.alloc_list[alloc_list], list) {
-            if (entry == chunk)
-                return alloc_list;
-        }
-    }
+    if (root_chunk->list_state == UVM_PMM_ROOT_LIST_VA_BLOCK_USED)
+        return UVM_PMM_ALLOC_LIST_USED;
+    if (root_chunk->list_state == UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED)
+        return UVM_PMM_ALLOC_LIST_UNUSED;
+    if (root_chunk->list_state == UVM_PMM_ROOT_LIST_VA_BLOCK_DISCARDED)
+        return UVM_PMM_ALLOC_LIST_DISCARDED;
 
     return UVM_PMM_ALLOC_LIST_COUNT;
 }
@@ -1655,7 +1847,11 @@ static uvm_gpu_chunk_t *find_free_chunk_locked(uvm_pmm_gpu_t *pmm,
             // lists. The eviction path does it with pin_free_chunks_func(),
             // but there is a window between when a root chunk is chosen for
             // eviction and all of its subchunks are removed from free lists.
-            list_del_init(&chunk->list);
+            uvm_pmm_root_list_update_locked(pmm,
+                                            chunk,
+                                            NULL,
+                                            UVM_PMM_ROOT_LIST_EVICTION,
+                                            UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         }
         else {
             // Bug 2085760: When NUMA GPU is enabled, also check that the root
@@ -2393,7 +2589,11 @@ static uvm_gpu_chunk_t *free_or_prepare_for_merge(uvm_pmm_gpu_t *pmm, uvm_gpu_ch
 
         UVM_ASSERT(subchunk->state == UVM_PMM_GPU_CHUNK_STATE_FREE);
 
-        list_del_init(&subchunk->list);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        subchunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         subchunk->state = UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED;
     }
     root_chunk_from_chunk(pmm, chunk)->chunk.suballoc->pinned_leaf_chunks += num_subchunks(chunk->parent);
@@ -2482,7 +2682,11 @@ bool free_next_available_root_chunk(uvm_pmm_gpu_t *pmm, uvm_pmm_gpu_memory_type_
     }
 
     if (result != NULL) {
-        list_del_init(&result->list);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        result,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         UVM_ASSERT(result->state == UVM_PMM_GPU_CHUNK_STATE_FREE);
         UVM_ASSERT(uvm_gpu_chunk_get_size(result) == UVM_CHUNK_SIZE_MAX);
         UVM_ASSERT(result->type == type);
@@ -2985,7 +3189,11 @@ void uvm_pmm_gpu_process_lazy_free(uvm_pmm_gpu_t *pmm)
     while (!list_empty(&pmm->root_chunks.va_block_lazy_free)) {
         chunk = list_first_entry(&pmm->root_chunks.va_block_lazy_free, uvm_gpu_chunk_t, list);
         UVM_ASSERT(chunk->state == UVM_PMM_GPU_CHUNK_STATE_TEMP_PINNED);
-        list_del_init(&chunk->list);
+        uvm_pmm_root_list_update_locked(pmm,
+                                        chunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_DEL_INIT);
         uvm_spin_unlock(&pmm->list_lock);
 
         free_chunk(pmm, chunk);
@@ -3079,16 +3287,23 @@ NV_STATUS uvm_pmm_gpu_init(uvm_pmm_gpu_t *pmm)
         goto cleanup;
     }
 
-    // Initialize all root chunks to be PMA owned and set their addresses
+    // Initialize all root chunks through the same membership helper used by
+    // every later root-list mutation.
+    uvm_spin_lock(&pmm->list_lock);
     for (i = 0; i < pmm->root_chunks.count; ++i) {
         uvm_gpu_chunk_t *chunk = &pmm->root_chunks.array[i].chunk;
 
-        INIT_LIST_HEAD(&chunk->list);
         chunk->gpu_index = uvm_id_gpu_index(gpu->id);
         chunk->state = UVM_PMM_GPU_CHUNK_STATE_PMA_OWNED;
         uvm_gpu_chunk_set_size(chunk, UVM_CHUNK_SIZE_MAX);
         chunk->address = i * UVM_CHUNK_SIZE_MAX;
+        uvm_pmm_root_list_update_locked(pmm,
+                                        chunk,
+                                        NULL,
+                                        UVM_PMM_ROOT_LIST_NONE,
+                                        UVM_PMM_ROOT_LIST_OP_INIT);
     }
+    uvm_spin_unlock(&pmm->list_lock);
 
     status = uvm_bit_locks_init(&pmm->root_chunks.bitlocks, pmm->root_chunks.count, UVM_LOCK_ORDER_PMM_ROOT_CHUNK);
     if (status != NV_OK)
@@ -3168,12 +3383,14 @@ void uvm_pmm_gpu_deinit(uvm_pmm_gpu_t *pmm)
     if (pmm->root_chunks.array) {
         // Make sure that all chunks have been returned to PMA
         for (i = 0; i < pmm->root_chunks.count; ++i) {
-            uvm_gpu_chunk_t *chunk = &pmm->root_chunks.array[i].chunk;
+            uvm_gpu_root_chunk_t *root_chunk = &pmm->root_chunks.array[i];
+            uvm_gpu_chunk_t *chunk = &root_chunk->chunk;
             UVM_ASSERT_MSG(chunk->state == UVM_PMM_GPU_CHUNK_STATE_PMA_OWNED,
                            "index %zu state %s GPU %s\n",
                            i,
                            uvm_pmm_gpu_chunk_state_string(chunk->state),
                            uvm_gpu_name(gpu));
+            UVM_ASSERT(root_chunk->list_state == UVM_PMM_ROOT_LIST_NONE);
         }
     }
     uvm_kvfree(pmm->root_chunks.array);

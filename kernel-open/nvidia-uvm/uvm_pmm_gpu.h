@@ -59,6 +59,7 @@
 #include "uvm_linux.h"
 #include "uvm_types.h"
 #include "nv_uvm_user_types.h"
+#include "nv-gpu-transition-validator.h"
 #if UVM_IS_CONFIG_HMM() || defined(CONFIG_PCI_P2PDMA)
 #include <linux/memremap.h>
 #endif
@@ -300,15 +301,42 @@ struct uvm_gpu_chunk_struct
     uvm_pmm_gpu_chunk_suballoc_t *suballoc;
 };
 
+typedef enum
+{
+    UVM_PMM_ROOT_LIST_NONE = 0,
+    UVM_PMM_ROOT_LIST_FREE,
+    UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+    UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED,
+    // 610 adds a native discarded list. It is tracked explicitly but is not
+    // a legal BPF reorder destination or source.
+    UVM_PMM_ROOT_LIST_VA_BLOCK_DISCARDED,
+    UVM_PMM_ROOT_LIST_EVICTION,
+    UVM_PMM_ROOT_LIST_LAZY_FREE,
+} uvm_pmm_root_list_state_t;
+
 typedef struct uvm_gpu_root_chunk_struct
 {
     uvm_gpu_chunk_t chunk;
+
+    uvm_pmm_root_list_state_t list_state;
+    NvU64 list_generation;
 
     // Pending operations for all GPU chunks under the root chunk.
     //
     // Protected by the corresponding root chunk bit lock.
     uvm_tracker_t tracker;
 } uvm_gpu_root_chunk_t;
+
+typedef enum
+{
+    UVM_PMM_ROOT_LIST_OP_INIT,
+    UVM_PMM_ROOT_LIST_OP_DEL_INIT,
+    UVM_PMM_ROOT_LIST_OP_ADD_TAIL,
+    UVM_PMM_ROOT_LIST_OP_MOVE_HEAD,
+    UVM_PMM_ROOT_LIST_OP_MOVE_TAIL,
+} uvm_pmm_root_list_op_t;
+
+struct uvm_bpf_pmm_decision_ctx;
 
 typedef struct uvm_pmm_gpu_struct
 {
@@ -392,6 +420,23 @@ NV_STATUS uvm_pmm_gpu_init(uvm_pmm_gpu_t *pmm);
 
 // Deinitialize the PMM on GPU
 void uvm_pmm_gpu_deinit(uvm_pmm_gpu_t *pmm);
+
+void uvm_pmm_root_list_update_locked(uvm_pmm_gpu_t *pmm,
+                                     uvm_gpu_chunk_t *chunk,
+                                     struct list_head *destination,
+                                     uvm_pmm_root_list_state_t root_state,
+                                     uvm_pmm_root_list_op_t operation);
+
+enum nv_gpu_pmm_access_effect
+uvm_pmm_bpf_apply_access_locked(uvm_pmm_gpu_t *pmm,
+                                uvm_gpu_chunk_t *chunk,
+                                struct uvm_bpf_pmm_decision_ctx *decision_ctx,
+                                NvS64 raw_action);
+
+enum nv_gpu_transition_result
+uvm_pmm_bpf_apply_activate_locked(uvm_pmm_gpu_t *pmm,
+                                  uvm_gpu_chunk_t *chunk,
+                                  struct uvm_bpf_pmm_decision_ctx *decision_ctx);
 
 static uvm_chunk_size_t uvm_gpu_chunk_get_size(uvm_gpu_chunk_t *chunk)
 {
