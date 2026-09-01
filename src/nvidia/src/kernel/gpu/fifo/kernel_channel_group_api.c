@@ -350,7 +350,7 @@ kchangrpapiConstruct_IMPL
             &observed,
             pKernelChannelGroup->timesliceUs,
             pKernelChannelGroup->pInterleaveLevel[subdevInst],
-            kfifoRunlistGetMinTimeSlice_HAL(pKernelFifo),
+            0U, // 610 removed the minimum guard and accepts the full NvU64 range.
             &decision.timeslice_request,
             &decision.interleave_request);
 
