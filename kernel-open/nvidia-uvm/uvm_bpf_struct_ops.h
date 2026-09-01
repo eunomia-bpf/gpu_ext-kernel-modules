@@ -4,6 +4,12 @@
 #include "uvm_va_block_types.h"
 #include "uvm_perf_prefetch.h"
 #include "uvm_pmm_gpu.h"
+#include "nv-gpu-transition-validator.h"
+
+typedef struct uvm_bpf_prefetch_decision
+{
+    nv_gpu_prefetch_decision_t request;
+} uvm_bpf_prefetch_decision_t;
 
 /* Action codes returned by BPF hooks */
 enum uvm_bpf_action {
@@ -17,18 +23,18 @@ int uvm_bpf_struct_ops_init(void);
 void uvm_bpf_struct_ops_exit(void);
 
 /* Wrapper functions for calling BPF hooks from kernel code */
-enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch(
+NvS64 uvm_bpf_call_gpu_page_prefetch(
     uvm_page_index_t page_index,
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,
-    uvm_va_block_region_t *result_region);
+    nv_gpu_prefetch_decision_t *decision);
 
-enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch_iter(
+NvS64 uvm_bpf_call_gpu_page_prefetch_iter(
     uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
     uvm_va_block_region_t *max_prefetch_region,
     uvm_va_block_region_t *current_region,
     unsigned int counter,
-    uvm_va_block_region_t *prefetch_region);
+    nv_gpu_prefetch_decision_t *decision);
 
 /* PMM eviction policy hook wrapper functions */
 void uvm_bpf_call_gpu_block_activate(

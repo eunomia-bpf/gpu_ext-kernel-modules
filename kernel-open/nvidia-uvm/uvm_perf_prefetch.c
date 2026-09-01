@@ -107,30 +107,82 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     NvU16 counter;
     uvm_perf_prefetch_bitmap_tree_iter_t iter;
     uvm_va_block_region_t prefetch_region = uvm_va_block_region(0, 0);
-    enum uvm_bpf_action action;
+    nv_gpu_prefetch_decision_t initial_decision = {0};
+    nv_gpu_transition_region_t validated_region;
+    enum nv_gpu_transition_result region_result;
+    enum nv_gpu_prefetch_initial_effect initial_effect;
+    NvS64 raw_action;
+    const NvU64 type_outer = (NvU64)(uvm_page_index_t)~0U;
 
-    // Call BPF hook before computation
-    action = uvm_bpf_call_gpu_page_prefetch(page_index, bitmap_tree,
-                                                   &max_prefetch_region, &prefetch_region);
+    raw_action = uvm_bpf_call_gpu_page_prefetch(page_index,
+                                                bitmap_tree,
+                                                &max_prefetch_region,
+                                                &initial_decision);
+    region_result = nv_gpu_transition_validate_region(&initial_decision,
+                                                       max_prefetch_region.first,
+                                                       max_prefetch_region.outer,
+                                                       PAGES_PER_UVM_VA_BLOCK,
+                                                       type_outer,
+                                                       &validated_region);
+    initial_effect = nv_gpu_transition_prefetch_initial_effect(raw_action,
+                                                               region_result);
 
-    if (action == UVM_BPF_ACTION_BYPASS) {
-        // BPF has set the result, skip all computation
-    } else if (action == UVM_BPF_ACTION_ENTER_LOOP) {
-        // Use tree iteration with BPF callbacks
+    if (initial_effect == NV_GPU_PREFETCH_INITIAL_BYPASS) {
+        prefetch_region.first = (uvm_page_index_t)validated_region.first;
+        prefetch_region.outer = (uvm_page_index_t)validated_region.outer;
+    }
+    else if (initial_effect == NV_GPU_PREFETCH_INITIAL_ITERATE) {
         uvm_perf_prefetch_bitmap_tree_traverse_counters(counter,
                                                         bitmap_tree,
                                                         page_index - max_prefetch_region.first + bitmap_tree->offset,
                                                         &iter) {
-            uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
+            uvm_va_block_region_t relative_region =
+                uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
+            uvm_va_block_region_t current_region = uvm_va_block_region(0, 0);
+            nv_gpu_transition_region_t absolute_region;
+            nv_gpu_prefetch_decision_t iterator_decision = {0};
+            enum nv_gpu_transition_result translate_result;
+            enum nv_gpu_transition_result iterator_region_result;
+            enum nv_gpu_prefetch_iterator_effect iterator_effect;
+            NvS64 iterator_action;
 
-            // Call BPF hook on each tree iteration
-            // BPF can modify prefetch_region via kfunc bpf_gpu_set_prefetch_region(prefetch_region, ...)
-            (void)uvm_bpf_call_gpu_page_prefetch_iter(bitmap_tree,
-                                               &max_prefetch_region, &subregion,
-                                               counter, &prefetch_region);
+            translate_result = nv_gpu_transition_translate_region(max_prefetch_region.first,
+                                                                   relative_region.first,
+                                                                   relative_region.outer,
+                                                                   bitmap_tree->offset,
+                                                                   max_prefetch_region.outer,
+                                                                   PAGES_PER_UVM_VA_BLOCK,
+                                                                   type_outer,
+                                                                   &absolute_region);
+            if (translate_result != NV_GPU_TRANSITION_APPLY)
+                continue;
+
+            current_region.first = (uvm_page_index_t)absolute_region.first;
+            current_region.outer = (uvm_page_index_t)absolute_region.outer;
+            iterator_action = uvm_bpf_call_gpu_page_prefetch_iter(bitmap_tree,
+                                                                  &max_prefetch_region,
+                                                                  &current_region,
+                                                                  counter,
+                                                                  &iterator_decision);
+            iterator_region_result =
+                nv_gpu_transition_validate_region(&iterator_decision,
+                                                   max_prefetch_region.first,
+                                                   max_prefetch_region.outer,
+                                                   PAGES_PER_UVM_VA_BLOCK,
+                                                   type_outer,
+                                                   &validated_region);
+            iterator_effect =
+                nv_gpu_transition_prefetch_iterator_effect(iterator_action,
+                                                            iterator_region_result);
+            if (iterator_effect == NV_GPU_PREFETCH_ITERATOR_COMMIT) {
+                prefetch_region.first = (uvm_page_index_t)validated_region.first;
+                prefetch_region.outer = (uvm_page_index_t)validated_region.outer;
+            }
         }
-    } else {
-        // UVM_BPF_ACTION_DEFAULT: use original kernel logic without BPF callbacks
+    }
+    else {
+        uvm_va_block_region_t relative_region = uvm_va_block_region(0, 0);
+
         uvm_perf_prefetch_bitmap_tree_traverse_counters(counter,
                                                         bitmap_tree,
                                                         page_index - max_prefetch_region.first + bitmap_tree->offset,
@@ -140,30 +192,22 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
 
             UVM_ASSERT(counter <= subregion_pages);
             if (counter * 100 > subregion_pages * g_uvm_perf_prefetch_threshold)
-                prefetch_region = subregion;
-        }
-    }
-
-    // Clamp prefetch region to actual pages
-    if (prefetch_region.outer) {
-        prefetch_region.first += max_prefetch_region.first;
-        if (prefetch_region.first < bitmap_tree->offset) {
-            prefetch_region.first = bitmap_tree->offset;
-        }
-        else {
-            prefetch_region.first -= bitmap_tree->offset;
-            if (prefetch_region.first < max_prefetch_region.first)
-                prefetch_region.first = max_prefetch_region.first;
+                relative_region = subregion;
         }
 
-        prefetch_region.outer += max_prefetch_region.first;
-        if (prefetch_region.outer < bitmap_tree->offset) {
-            prefetch_region.outer = bitmap_tree->offset;
-        }
-        else {
-            prefetch_region.outer -= bitmap_tree->offset;
-            if (prefetch_region.outer > max_prefetch_region.outer)
-                prefetch_region.outer = max_prefetch_region.outer;
+        if (relative_region.outer != 0) {
+            region_result = nv_gpu_transition_translate_region(max_prefetch_region.first,
+                                                               relative_region.first,
+                                                               relative_region.outer,
+                                                               bitmap_tree->offset,
+                                                               max_prefetch_region.outer,
+                                                               PAGES_PER_UVM_VA_BLOCK,
+                                                               type_outer,
+                                                               &validated_region);
+            if (region_result == NV_GPU_TRANSITION_APPLY) {
+                prefetch_region.first = (uvm_page_index_t)validated_region.first;
+                prefetch_region.outer = (uvm_page_index_t)validated_region.outer;
+            }
         }
     }
 
