@@ -84,21 +84,33 @@ __bpf_kfunc_start_defs();
 /*
  * bpf_nv_gpu_set_timeslice - Set timeslice for a TSG
  */
-__bpf_kfunc void bpf_nv_gpu_set_timeslice(struct nv_gpu_task_init_ctx *ctx,
-                                          u64 timeslice_us)
+__bpf_kfunc int bpf_nv_gpu_set_timeslice(struct nv_gpu_task_init_ctx *ctx,
+                                         u64 timeslice_us)
 {
-    if (ctx)
-        ctx->timeslice = timeslice_us;
+    struct nv_gpu_task_init_decision_ctx *decision;
+
+    if (!ctx)
+        return (int)NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+    decision = container_of(ctx, struct nv_gpu_task_init_decision_ctx, input);
+    return (int)nv_gpu_transition_record_u64(&decision->timeslice_request,
+                                             timeslice_us);
 }
 
 /*
  * bpf_nv_gpu_set_interleave - Set interleave level for a TSG
  */
-__bpf_kfunc void bpf_nv_gpu_set_interleave(struct nv_gpu_task_init_ctx *ctx,
-                                           u32 interleave_level)
+__bpf_kfunc int bpf_nv_gpu_set_interleave(struct nv_gpu_task_init_ctx *ctx,
+                                          u32 interleave_level)
 {
-    if (ctx)
-        ctx->interleave_level = interleave_level;
+    struct nv_gpu_task_init_decision_ctx *decision;
+
+    if (!ctx)
+        return (int)NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+    decision = container_of(ctx, struct nv_gpu_task_init_decision_ctx, input);
+    return (int)nv_gpu_transition_record_u32(&decision->interleave_request,
+                                             interleave_level);
 }
 
 /*
@@ -177,7 +189,18 @@ static bool nv_gpu_sched_ops_is_valid_access(int off, int size,
                                              const struct bpf_prog *prog,
                                              struct bpf_insn_access_aux *info)
 {
+    if (type == BPF_WRITE)
+        return false;
+
     return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
+}
+
+static int nv_gpu_sched_ops_btf_struct_access(struct bpf_verifier_log *log,
+                                              const struct bpf_reg_state *reg,
+                                              int off,
+                                              int size)
+{
+    return -EACCES;
 }
 
 /*
@@ -229,6 +252,7 @@ nv_gpu_sched_ops_get_func_proto(enum bpf_func_id func_id,
 static const struct bpf_verifier_ops nv_gpu_sched_ops_verifier_ops = {
     .is_valid_access = nv_gpu_sched_ops_is_valid_access,
     .get_func_proto = nv_gpu_sched_ops_get_func_proto,
+    .btf_struct_access = nv_gpu_sched_ops_btf_struct_access,
 };
 
 static int nv_gpu_sched_ops_init_member(const struct btf_type *t,
@@ -364,7 +388,7 @@ EXPORT_SYMBOL(nv_gpu_sched_struct_ops_exit);
  *   - Set interleave level (LOW/MEDIUM/HIGH)
  *   - Record task creation in eBPF maps
  *
- * Called from: kchangrpInit_IMPL (kernel_channel_group.c)
+ * Called from: kchangrpapiConstruct_IMPL after native scheduling defaults
  *
  * Example bpftrace usage:
  *   kprobe:nv_gpu_sched_task_init {

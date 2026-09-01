@@ -18,24 +18,12 @@
 #define _NV_GPU_SCHED_HOOKS_H_
 
 #include <linux/types.h>
+#include "nv-gpu-transition-validator.h"
 
 /*
  * Context structures for hook functions
  * These mirror the bpf_gpu_*_ctx structures from the design document
  */
-
-/* Hook 1: task_init context - TSG creation */
-struct nv_gpu_task_init_ctx {
-    u64 tsg_id;               /* TSG ID (grpID) */
-    u32 engine_type;          /* Engine type (GRAPHICS, COPY, NVDEC, etc.) */
-    u64 default_timeslice;    /* Default timeslice in microseconds */
-    u32 default_interleave;   /* Default interleave level */
-    u32 runlist_id;           /* Runlist ID */
-
-    /* Output fields - eBPF can modify via map lookup after hook */
-    u64 timeslice;            /* New timeslice (0 = no change) */
-    u32 interleave_level;     /* New interleave level (0 = no change) */
-};
 
 /* Hook 2: bind context - TSG bind to hardware runlist */
 struct nv_gpu_bind_ctx {
@@ -105,10 +93,10 @@ struct nv_gpu_sched_ops {
      *
      * @ctx: Task init context with TSG info
      *
-     * BPF can modify ctx->timeslice and ctx->interleave_level to customize
-     * scheduling parameters for this TSG.
+     * BPF can request timeslice and interleave changes through the registered
+     * kfuncs. Direct context writes are rejected by the verifier.
      *
-     * Return: 0 to use defaults, 1 if context was modified
+     * Return: ignored; setter kfunc calls carry decisions
      */
     int (*on_task_init)(struct nv_gpu_task_init_ctx *ctx);
 
@@ -117,10 +105,11 @@ struct nv_gpu_sched_ops {
      *
      * @ctx: Bind context with TSG info
      *
-     * BPF can set ctx->allow = 0 to reject binding.
+     * BPF can reject binding through bpf_nv_gpu_reject_bind(). Direct context
+     * writes are rejected by the verifier.
      * This is the admission control point.
      *
-     * Return: 0 to allow, non-zero to reject binding
+     * Return: ignored; bpf_nv_gpu_reject_bind() carries rejection
      */
     int (*on_bind)(struct nv_gpu_bind_ctx *ctx);
 

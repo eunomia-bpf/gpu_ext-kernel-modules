@@ -4,9 +4,31 @@
  */
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 #include "nv-gpu-transition-validator.h"
+
+_Static_assert(offsetof(struct nv_gpu_task_init_ctx, tsg_id) == 0,
+               "task-init tsg_id ABI");
+_Static_assert(offsetof(struct nv_gpu_task_init_ctx, engine_type) == 8,
+               "task-init engine_type ABI");
+_Static_assert(offsetof(struct nv_gpu_task_init_ctx, default_timeslice) == 16,
+               "task-init default_timeslice ABI");
+_Static_assert(offsetof(struct nv_gpu_task_init_ctx, default_interleave) == 24,
+               "task-init default_interleave ABI");
+_Static_assert(offsetof(struct nv_gpu_task_init_ctx, runlist_id) == 28,
+               "task-init runlist_id ABI");
+_Static_assert(sizeof(struct nv_gpu_task_init_ctx) == 32,
+               "task-init input ABI size");
+_Static_assert(offsetof(struct nv_gpu_task_init_decision_ctx,
+                        timeslice_request) == 32,
+               "task-init timeslice decision offset");
+_Static_assert(offsetof(struct nv_gpu_task_init_decision_ctx,
+                        interleave_request) == 48,
+               "task-init interleave decision offset");
+_Static_assert(sizeof(struct nv_gpu_task_init_decision_ctx) == 56,
+               "task-init decision ABI size");
 
 #define EXPECT(condition)                                                         \
     do                                                                            \

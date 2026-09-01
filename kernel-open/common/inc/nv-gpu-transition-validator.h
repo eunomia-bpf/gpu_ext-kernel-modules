@@ -73,6 +73,24 @@ typedef struct
     NvU32 value;
 } nv_gpu_transition_u32_request_t;
 
+/* Scheduler callback input. Policy code can observe only this prefix. */
+struct nv_gpu_task_init_ctx
+{
+    NvU64 tsg_id;
+    NvU32 engine_type;
+    NvU64 default_timeslice;
+    NvU32 default_interleave;
+    NvU32 runlist_id;
+};
+
+/* Driver-owned state surrounding the callback input. */
+struct nv_gpu_task_init_decision_ctx
+{
+    struct nv_gpu_task_init_ctx input;
+    nv_gpu_transition_u64_request_t timeslice_request;
+    nv_gpu_transition_u32_request_t interleave_request;
+};
+
 typedef struct
 {
     NvU64 tsg_id;
@@ -160,13 +178,13 @@ nv_gpu_transition_record_u32(nv_gpu_transition_u32_request_t *request, NvU32 val
 
 static inline enum nv_gpu_transition_result
 nv_gpu_transition_validate_snapshot(const nv_gpu_scheduler_snapshot_t *expected,
-                                    const nv_gpu_scheduler_snapshot_t *current)
+                                    const nv_gpu_scheduler_snapshot_t *observed)
 {
-    if ((expected->tsg_id != current->tsg_id) ||
-        (expected->runlist_id != current->runlist_id))
+    if ((expected->tsg_id != observed->tsg_id) ||
+        (expected->runlist_id != observed->runlist_id))
         return NV_GPU_TRANSITION_REJECT_IDENTITY;
 
-    if (expected->phase != current->phase)
+    if (expected->phase != observed->phase)
         return NV_GPU_TRANSITION_NOOP_STALE;
 
     return NV_GPU_TRANSITION_APPLY;
@@ -174,7 +192,7 @@ nv_gpu_transition_validate_snapshot(const nv_gpu_scheduler_snapshot_t *expected,
 
 static inline nv_gpu_scheduler_validation_t
 nv_gpu_transition_validate_scheduler(const nv_gpu_scheduler_snapshot_t *expected,
-                                     const nv_gpu_scheduler_snapshot_t *current,
+                                     const nv_gpu_scheduler_snapshot_t *observed,
                                      NvU64 native_timeslice,
                                      NvU32 native_interleave,
                                      NvU64 minimum_timeslice,
@@ -188,7 +206,7 @@ nv_gpu_transition_validate_scheduler(const nv_gpu_scheduler_snapshot_t *expected
         .interleave = native_interleave,
     };
     enum nv_gpu_transition_result snapshot_result =
-        nv_gpu_transition_validate_snapshot(expected, current);
+        nv_gpu_transition_validate_snapshot(expected, observed);
 
     if (snapshot_result != NV_GPU_TRANSITION_APPLY)
     {
@@ -455,15 +473,15 @@ nv_gpu_transition_record_pmm(nv_gpu_pmm_request_t *request,
 
 static inline enum nv_gpu_transition_result
 nv_gpu_transition_validate_pmm(const nv_gpu_pmm_snapshot_t *expected,
-                               const nv_gpu_pmm_snapshot_t *current,
+                               const nv_gpu_pmm_snapshot_t *observed,
                                const nv_gpu_pmm_request_t *request)
 {
-    if ((expected->owner_id != current->owner_id) ||
-        (expected->root_id != current->root_id))
+    if ((expected->owner_id != observed->owner_id) ||
+        (expected->root_id != observed->root_id))
         return NV_GPU_TRANSITION_REJECT_IDENTITY;
 
-    if ((expected->generation != current->generation) ||
-        (expected->source != current->source))
+    if ((expected->generation != observed->generation) ||
+        (expected->source != observed->source))
         return NV_GPU_TRANSITION_NOOP_STALE;
 
     if (request->conflict)

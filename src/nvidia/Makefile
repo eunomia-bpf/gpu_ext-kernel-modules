@@ -40,6 +40,7 @@ CFLAGS += -I inc/os
 CFLAGS += -I $(SRC_COMMON)/shared/inc
 CFLAGS += -I $(SRC_COMMON)/shared/msgq/inc
 CFLAGS += -I $(SRC_COMMON)/inc
+CFLAGS += -I ../../kernel-open/common/inc
 
 CFLAGS += -I $(SRC_COMMON)/uproc/os/libos-v2.0.0/include
 CFLAGS += -I $(SRC_COMMON)/uproc/os/common/include
