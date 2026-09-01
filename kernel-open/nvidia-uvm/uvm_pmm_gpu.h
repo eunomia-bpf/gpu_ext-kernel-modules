@@ -59,6 +59,7 @@
 #include "uvm_linux.h"
 #include "uvm_types.h"
 #include "nv_uvm_types.h"
+#include "nv-gpu-transition-validator.h"
 #if UVM_IS_CONFIG_HMM() || defined(CONFIG_PCI_P2PDMA)
 #include <linux/memremap.h>
 #endif
@@ -305,15 +306,44 @@ struct uvm_gpu_chunk_struct
     uvm_pmm_gpu_chunk_suballoc_t *suballoc;
 };
 
+typedef enum
+{
+    UVM_PMM_ROOT_LIST_NONE = 0,
+    UVM_PMM_ROOT_LIST_FREE,
+    UVM_PMM_ROOT_LIST_VA_BLOCK_USED,
+    UVM_PMM_ROOT_LIST_VA_BLOCK_UNUSED,
+    UVM_PMM_ROOT_LIST_EVICTION,
+    UVM_PMM_ROOT_LIST_LAZY_FREE,
+} uvm_pmm_root_list_state_t;
+
 typedef struct uvm_gpu_root_chunk_struct
 {
     uvm_gpu_chunk_t chunk;
+
+    // Driver-owned root-list membership. This is the authoritative source for
+    // policy validation; list_empty() is not a membership predicate.
+    uvm_pmm_root_list_state_t list_state;
+
+    // Advanced on ownership and cross-list transitions, but not on a
+    // same-list head/tail reorder. Protected by pmm->list_lock.
+    NvU64 list_generation;
 
     // Pending operations for all GPU chunks under the root chunk.
     //
     // Protected by the corresponding root chunk bit lock.
     uvm_tracker_t tracker;
 } uvm_gpu_root_chunk_t;
+
+typedef enum
+{
+    UVM_PMM_ROOT_LIST_OP_INIT,
+    UVM_PMM_ROOT_LIST_OP_DEL_INIT,
+    UVM_PMM_ROOT_LIST_OP_ADD_TAIL,
+    UVM_PMM_ROOT_LIST_OP_MOVE_HEAD,
+    UVM_PMM_ROOT_LIST_OP_MOVE_TAIL,
+} uvm_pmm_root_list_op_t;
+
+struct uvm_bpf_pmm_decision_ctx;
 
 typedef struct uvm_pmm_gpu_struct
 {
@@ -393,6 +423,29 @@ NV_STATUS uvm_pmm_gpu_init(uvm_pmm_gpu_t *pmm);
 
 // Deinitialize the PMM on GPU
 void uvm_pmm_gpu_deinit(uvm_pmm_gpu_t *pmm);
+
+// Perform every PMM chunk-list mutation that can alias a root chunk. Root
+// membership and generation are updated atomically under pmm->list_lock;
+// proven subchunk targets retain their root's membership metadata.
+void uvm_pmm_root_list_update_locked(uvm_pmm_gpu_t *pmm,
+                                     uvm_gpu_chunk_t *chunk,
+                                     struct list_head *destination,
+                                     uvm_pmm_root_list_state_t root_state,
+                                     uvm_pmm_root_list_op_t operation);
+
+// Production PMM policy commit helpers. Both validate callback-local identity,
+// source membership, generation, request range, conflict, and action semantics
+// while pmm->list_lock remains held.
+enum nv_gpu_pmm_access_effect
+uvm_pmm_bpf_apply_access_locked(uvm_pmm_gpu_t *pmm,
+                                uvm_gpu_chunk_t *chunk,
+                                struct uvm_bpf_pmm_decision_ctx *decision_ctx,
+                                NvS64 raw_action);
+
+enum nv_gpu_transition_result
+uvm_pmm_bpf_apply_activate_locked(uvm_pmm_gpu_t *pmm,
+                                  uvm_gpu_chunk_t *chunk,
+                                  struct uvm_bpf_pmm_decision_ctx *decision_ctx);
 
 static uvm_chunk_size_t uvm_gpu_chunk_get_size(uvm_gpu_chunk_t *chunk)
 {
