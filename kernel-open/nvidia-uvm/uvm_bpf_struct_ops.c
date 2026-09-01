@@ -8,7 +8,6 @@
 #include <linux/seq_file.h>
 #include <linux/bpf_verifier.h>
 #include "uvm_bpf_struct_ops.h"
-#include "uvm_migrate.h"
 
 /* New kernels require trusted kfunc arguments by default and removed this flag. */
 #ifndef KF_TRUSTED_ARGS
@@ -38,14 +37,14 @@ struct gpu_mem_ops {
 		uvm_page_index_t page_index,
 		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 		uvm_va_block_region_t *max_prefetch_region,
-		uvm_va_block_region_t *result_region);
+		uvm_bpf_prefetch_decision_t *decision_ctx);
 
 	int (*gpu_page_prefetch_iter)(
 		uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 		uvm_va_block_region_t *max_prefetch_region,
 		uvm_va_block_region_t *current_region,
 		unsigned int counter,
-		uvm_va_block_region_t *prefetch_region);
+		uvm_bpf_prefetch_decision_t *decision_ctx);
 
 	/* PMM eviction policy hooks */
 	int (*gpu_block_activate)(
@@ -82,7 +81,7 @@ static int gpu_mem_ops__gpu_page_prefetch(
 	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
-	uvm_va_block_region_t *result_region)
+	uvm_bpf_prefetch_decision_t *decision_ctx)
 {
 	return UVM_BPF_ACTION_DEFAULT;
 }
@@ -92,7 +91,7 @@ static int gpu_mem_ops__gpu_page_prefetch_iter(
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
 	unsigned int counter,
-	uvm_va_block_region_t *prefetch_region)
+	uvm_bpf_prefetch_decision_t *decision_ctx)
 {
 	return UVM_BPF_ACTION_DEFAULT;
 }
@@ -141,15 +140,17 @@ __bpf_kfunc int bpf_gpu_strstr(const char *str, u32 str__sz, const char *substr,
 	return -1;
 }
 
-/* Set the prefetch region - allows BPF to read and modify the region */
-__bpf_kfunc void bpf_gpu_set_prefetch_region(uvm_va_block_region_t *region,
-					     uvm_page_index_t first,
-					     uvm_page_index_t outer)
+/* Record one callback-local prefetch request without narrowing its endpoints. */
+__bpf_kfunc int bpf_gpu_set_prefetch_region(uvm_bpf_prefetch_decision_t *decision_ctx,
+					    u64 first,
+					    u64 outer)
 {
-	if (!region)
-		return;
-	region->first = first;
-	region->outer = outer;
+	if (!decision_ctx)
+		return NV_GPU_TRANSITION_REJECT_IDENTITY;
+
+	return nv_gpu_transition_record_prefetch(&decision_ctx->request,
+						 first,
+						 outer);
 }
 
 /* Move chunk to head of the list (makes it highest priority for eviction) */
@@ -172,21 +173,6 @@ __bpf_kfunc void bpf_gpu_block_move_tail(uvm_gpu_chunk_t *chunk,
 	list_move_tail(&chunk->list, list);
 }
 
-/* ===== Cross-block prefetch kfunc ===== */
-
-/* Migrate a VA range to GPU — sleepable kfunc.
- * Must be called from sleepable BPF context (e.g., bpf_wq callback).
- * Acquires va_space read lock internally via uvm_migrate_bpf().
- * Caller must ensure va_space_handle is valid (obtained from same process
- * context, e.g., during active benchmark). */
-__bpf_kfunc int bpf_gpu_migrate_range(u64 va_space_handle, u64 addr, u64 length)
-{
-	uvm_va_space_t *va_space = (uvm_va_space_t *)va_space_handle;
-	if (!va_space || !length)
-		return -EINVAL;
-	return (int)uvm_migrate_bpf(va_space, addr, length);
-}
-
 /* End kfunc definitions */
 __bpf_kfunc_end_defs();
 
@@ -196,7 +182,6 @@ BTF_ID_FLAGS(func, bpf_gpu_strstr)
 BTF_ID_FLAGS(func, bpf_gpu_set_prefetch_region, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_gpu_block_move_head, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_gpu_block_move_tail, KF_TRUSTED_ARGS)
-BTF_ID_FLAGS(func, bpf_gpu_migrate_range, KF_SLEEPABLE)
 BTF_KFUNCS_END(uvm_bpf_kfunc_ids_set)
 
 /* Register the kfunc ID set */
@@ -221,6 +206,14 @@ static bool gpu_mem_ops_is_valid_access(int off, int size,
 	return bpf_tracing_btf_ctx_access(off, size, type, prog, info);
 }
 
+static int gpu_mem_ops_btf_struct_access(struct bpf_verifier_log *log,
+					 const struct bpf_reg_state *reg,
+					 int off,
+					 int size)
+{
+	return -EACCES;
+}
+
 /* Allow specific BPF helpers to be used in struct_ops programs */
 static const struct bpf_func_proto *
 gpu_mem_ops_get_func_proto(enum bpf_func_id func_id,
@@ -233,6 +226,7 @@ gpu_mem_ops_get_func_proto(enum bpf_func_id func_id,
 static const struct bpf_verifier_ops gpu_mem_ops_verifier_ops = {
 	.is_valid_access = gpu_mem_ops_is_valid_access,
 	.get_func_proto = gpu_mem_ops_get_func_proto,
+	.btf_struct_access = gpu_mem_ops_btf_struct_access,
 };
 
 static int gpu_mem_ops_init_member(const struct btf_type *t,
@@ -362,13 +356,14 @@ void uvm_bpf_struct_ops_exit(void)
 }
 
 /* Wrapper functions for calling BPF hooks */
-enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch(
+NvS64 uvm_bpf_call_gpu_page_prefetch(
 	uvm_page_index_t page_index,
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
-	uvm_va_block_region_t *result_region)
+	nv_gpu_prefetch_decision_t *decision)
 {
 	struct gpu_mem_ops *ops;
+	uvm_bpf_prefetch_decision_t decision_ctx = {0};
 	int ret = UVM_BPF_ACTION_DEFAULT;
 
 	rcu_read_lock();
@@ -376,21 +371,23 @@ enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch(
 	if (ops && ops->gpu_page_prefetch) {
 		ret = ops->gpu_page_prefetch(page_index, bitmap_tree,
 						       max_prefetch_region,
-						       result_region);
+						       &decision_ctx);
 	}
 	rcu_read_unlock();
 
-	return (enum uvm_bpf_action)ret;
+	*decision = decision_ctx.request;
+	return (NvS64)ret;
 }
 
-enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch_iter(
+NvS64 uvm_bpf_call_gpu_page_prefetch_iter(
 	uvm_perf_prefetch_bitmap_tree_t *bitmap_tree,
 	uvm_va_block_region_t *max_prefetch_region,
 	uvm_va_block_region_t *current_region,
 	unsigned int counter,
-	uvm_va_block_region_t *prefetch_region)
+	nv_gpu_prefetch_decision_t *decision)
 {
 	struct gpu_mem_ops *ops;
+	uvm_bpf_prefetch_decision_t decision_ctx = {0};
 	int ret = UVM_BPF_ACTION_DEFAULT;
 
 	rcu_read_lock();
@@ -398,11 +395,12 @@ enum uvm_bpf_action uvm_bpf_call_gpu_page_prefetch_iter(
 	if (ops && ops->gpu_page_prefetch_iter) {
 		ret = ops->gpu_page_prefetch_iter(bitmap_tree,
 						     max_prefetch_region, current_region,
-						     counter, prefetch_region);
+						     counter, &decision_ctx);
 	}
 	rcu_read_unlock();
 
-	return (enum uvm_bpf_action)ret;
+	*decision = decision_ctx.request;
+	return (NvS64)ret;
 }
 
 /* PMM eviction policy hook wrappers */
