@@ -78,6 +78,9 @@ kchangrpapiConstruct_IMPL
 )
 {
     NvBool                                  bTsgAllocated       = NV_FALSE;
+    NvBool                                  bPolicyTimeslice    = NV_FALSE;
+    NvBool                                  bPolicyInterleave   = NV_FALSE;
+    NvBool                                  bPolicyRemoteAllocated = NV_FALSE;
     RsResourceRef                          *pResourceRef        = pCallContext->pResourceRef;
     NV_STATUS                               rmStatus;
     OBJVASPACE                             *pVAS                = NULL;
@@ -363,6 +366,7 @@ kchangrpapiConstruct_IMPL
                                               validation.timeslice,
                                               NV_TRUE),
                 failed);
+            bPolicyTimeslice = NV_TRUE;
         }
 
         if (_kchangrpapiPolicyValueApplies(validation.interleave_result))
@@ -373,6 +377,7 @@ kchangrpapiConstruct_IMPL
                                            pKernelChannelGroup,
                                            validation.interleave),
                 failed);
+            bPolicyInterleave = NV_TRUE;
         }
     }
 
@@ -526,6 +531,40 @@ kchangrpapiConstruct_IMPL
             goto failed;
         }
 
+        // The open GSP-client scheduling HAL setters update only CPU-side
+        // bookkeeping. Replay validated policy decisions after the remote
+        // object exists; allocation parameters do not carry these fields.
+        // No policy request means no additional RPC, preserving native alloc.
+        bPolicyRemoteAllocated = IS_GSP_CLIENT(pGpu) &&
+                                 (bPolicyTimeslice || bPolicyInterleave);
+        if (IS_GSP_CLIENT(pGpu) && bPolicyTimeslice)
+        {
+            NVA06C_CTRL_TIMESLICE_PARAMS timesliceParams = {0};
+            timesliceParams.timesliceUs = pKernelChannelGroup->timesliceUs;
+            NV_RM_RPC_CONTROL(pGpu,
+                              pParams->hClient,
+                              pParams->hResource,
+                              NVA06C_CTRL_CMD_SET_TIMESLICE,
+                              &timesliceParams,
+                              sizeof(timesliceParams),
+                              rmStatus);
+            NV_CHECK_OR_GOTO(LEVEL_ERROR, rmStatus == NV_OK, failed);
+        }
+        if (IS_GSP_CLIENT(pGpu) && bPolicyInterleave)
+        {
+            NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
+            NVA06C_CTRL_INTERLEAVE_LEVEL_PARAMS interleaveParams = {0};
+            interleaveParams.tsgInterleaveLevel = pKernelChannelGroup->pInterleaveLevel[subdevInst];
+            NV_RM_RPC_CONTROL(pGpu,
+                              pParams->hClient,
+                              pParams->hResource,
+                              NVA06C_CTRL_CMD_SET_INTERLEAVE_LEVEL,
+                              &interleaveParams,
+                              sizeof(interleaveParams),
+                              rmStatus);
+            NV_CHECK_OR_GOTO(LEVEL_ERROR, rmStatus == NV_OK, failed);
+        }
+
         if (IS_VIRTUAL_WITH_FULL_SRIOV(pGpu) || IS_GSP_CLIENT(pGpu))
         {
             NVA06C_CTRL_INTERNAL_PROMOTE_FAULT_METHOD_BUFFERS_PARAMS params = {
@@ -602,6 +641,22 @@ kchangrpapiConstruct_IMPL
 failed:
     if (rmStatus != NV_OK)
     {
+        // A failed constructor does not enter the normal resource-server
+        // free path. Compensate a successful remote allocation before local
+        // teardown, retaining the original policy/control failure status.
+        if (bPolicyRemoteAllocated)
+        {
+            NV_STATUS freeStatus = NV_OK;
+            NV_RM_RPC_FREE(pGpu, pParams->hClient, pParams->hParent,
+                          pParams->hResource, freeStatus);
+            if (freeStatus == NV_OK)
+                staticCast(pKernelChannelGroupApi, RmResource)->bRpcFree = NV_FALSE;
+            else
+                NV_PRINTF(LEVEL_ERROR,
+                          "Policy allocation rollback RPC failed: 0x%x\n",
+                          freeStatus);
+        }
+
         if (pKernelChannelGroupApi->hKernelGraphicsContext != NV01_NULL_OBJECT)
         {
             pRmApi->Free(pRmApi, pParams->hClient,
