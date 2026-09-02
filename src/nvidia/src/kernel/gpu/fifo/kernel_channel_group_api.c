@@ -110,6 +110,8 @@ kchangrpapiConstruct_IMPL
               pParams->hClient, pParams->hParent, pParams->hResource,
               pParams->externalClassId);
 
+    pKernelChannelGroupApi->gpreemptCreatorThreadId = portThreadGetCurrentThreadId();
+
     if (RS_IS_COPY_CTOR(pParams))
     {
         NV_ASSERT_OK_OR_GOTO(rmStatus,

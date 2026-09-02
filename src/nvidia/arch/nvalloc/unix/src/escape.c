@@ -53,6 +53,167 @@
 #include <ctrl/ctrl00fd.h>
 
 #include <ctrl/ctrl00e0.h>
+#include <ctrl/ctrl2080/ctrl2080fifo.h>
+#include <core/thread_state.h>
+#include <rmapi/rs_utils.h>
+#include <rmapi/client.h>
+#include <gpu/gpu.h>
+#include <kernel/gpu/fifo/kernel_channel.h>
+#include <kernel/gpu/fifo/kernel_channel_group.h>
+#include <kernel/gpu/fifo/kernel_channel_group_api.h>
+#include <nv-gpreempt-transport.h>
+
+ct_assert(sizeof(NVOS54_PARAMETERS) == 32);
+ct_assert(sizeof(NVA06C_CTRL_TIMESLICE_PARAMS) == 8);
+ct_assert(NV2080_CTRL_FIFO_DISABLE_CHANNELS_MAX_ENTRIES == NV_GPREEMPT_MAX_CHANNELS);
+
+/*
+ * GPreempt opens its own control FD. Authorize by the actual retained Linux
+ * TGID object, not by that new FD, a global OSInfo pointer, or numeric PID.
+ * The legacy query selects exactly one owned GR TSG created by the supplied
+ * TID. The versioned write endpoint accepts only GPreempt's two timeslices.
+ * Generic NV_ESC_RM_CONTROL and its security checks are deliberately unchanged.
+ */
+static NV_STATUS RmGPreemptTransport(NVOS54_PARAMETERS *pApi)
+{
+    NV2080_CTRL_FIFO_DISABLE_CHANNELS_PARAMS channels = {0};
+    NVA06C_CTRL_TIMESLICE_PARAMS timeslice = {0};
+    enum nv_gpreempt_operation operation;
+    NvU32 requestedClient = pApi->hClient;
+    NvU32 requestedObject = pApi->hObject;
+    NvU32 selectedClient = 0, selectedObject = 0, matches = 0;
+    NV_STATUS status = NV_ERR_INVALID_ARGUMENT;
+    THREAD_STATE_NODE threadState;
+    RmClient **ppClient;
+    void *pidInfo;
+
+    operation = nv_gpreempt_operation(pApi->flags, pApi->cmd,
+        requestedClient, requestedObject, pApi->params != NvP64_NULL,
+        pApi->paramsSize, sizeof(channels));
+    if (pApi->flags == 0)
+    {
+        pApi->hClient = 0;
+        pApi->hObject = 0;
+    }
+    if (operation == NV_GPREEMPT_INVALID)
+        return status;
+
+    if (operation == NV_GPREEMPT_SET_TIMESLICE)
+    {
+        status = os_memcpy_from_user(&timeslice, NvP64_VALUE(pApi->params),
+                                     sizeof(timeslice));
+        if (status != NV_OK)
+            return status;
+        if (!nv_gpreempt_timeslice_allowed(timeslice.timesliceUs))
+            return NV_ERR_INVALID_ARGUMENT;
+    }
+
+    pidInfo = osGetPidInfo();
+    if (pidInfo == NULL)
+        return NV_ERR_INSUFFICIENT_PERMISSIONS;
+    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
+    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_OSAPI);
+    if (status != NV_OK)
+        goto done;
+    status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_OSAPI);
+    if (status != NV_OK)
+        goto unlock_api;
+
+    status = NV_ERR_OBJECT_NOT_FOUND;
+    for (ppClient = serverutilGetFirstClientUnderLock(); ppClient != NULL;
+         ppClient = serverutilGetNextClientUnderLock(ppClient))
+    {
+        RmClient *pClient = *ppClient;
+        RsClient *pRsClient = staticCast(pClient, RsClient);
+        RS_ITERATOR it;
+
+        if (!nv_gpreempt_owned_user(pidInfo, pClient->pOsPidInfo,
+                                    pRsClient->type == CLIENT_TYPE_USER))
+            continue;
+        if (operation == NV_GPREEMPT_SET_TIMESLICE &&
+            pRsClient->hClient != requestedClient)
+            continue;
+
+        it = clientRefIter(pRsClient, NULL, classId(KernelChannelGroupApi),
+                           RS_ITERATE_DESCENDANTS, NV_TRUE);
+        while (clientRefIterNext(pRsClient, &it))
+        {
+            KernelChannelGroupApi *pApiGroup = dynamicCast(
+                it.pResourceRef->pResource, KernelChannelGroupApi);
+            KernelChannelGroup *pGroup = pApiGroup ? pApiGroup->pKernelChannelGroup : NULL;
+            RS_ITERATOR childIt;
+
+            if (pGroup == NULL || !RM_ENGINE_TYPE_IS_GR(pGroup->engineType))
+                continue;
+            if (operation == NV_GPREEMPT_SET_TIMESLICE)
+            {
+                RM_API *pRmApi;
+                if (it.pResourceRef->hResource != requestedObject)
+                    continue;
+                if (!IS_GSP_CLIENT(GPU_RES_GET_GPU(pApiGroup)))
+                {
+                    status = NV_ERR_NOT_SUPPORTED;
+                    goto unlock_gpu;
+                }
+                /* Ownership and class were checked under the same locks as
+                 * the one whitelisted operation; no user command is forwarded.
+                 * Kernel-local params avoid a second, mutable user read. */
+                pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+                status = pRmApi->Control(pRmApi, requestedClient, requestedObject,
+                    NVA06C_CTRL_CMD_SET_TIMESLICE, &timeslice, sizeof(timeslice));
+                goto unlock_gpu;
+            }
+
+            if (pApiGroup->gpreemptCreatorThreadId != requestedClient)
+                continue;
+            if (!nv_gpreempt_add_unique_match(&matches))
+            {
+                status = NV_ERR_INVALID_STATE; /* Ambiguous: never guess. */
+                goto unlock_gpu;
+            }
+            selectedClient = pRsClient->hClient;
+            selectedObject = it.pResourceRef->hResource;
+            childIt = clientRefIter(pRsClient, it.pResourceRef,
+                classId(KernelChannel), RS_ITERATE_CHILDREN, NV_TRUE);
+            while (clientRefIterNext(pRsClient, &childIt))
+            {
+                NvU32 slot = channels.numChannels;
+                if (!nv_gpreempt_channel_slot_available(slot))
+                {
+                    status = NV_ERR_BUFFER_TOO_SMALL;
+                    goto unlock_gpu;
+                }
+                channels.hClientList[slot] = selectedClient;
+                channels.hChannelList[slot] = childIt.pResourceRef->hResource;
+                channels.numChannels++;
+            }
+        }
+    }
+    if (operation == NV_GPREEMPT_QUERY &&
+        nv_gpreempt_query_complete(matches, channels.numChannels))
+        status = NV_OK;
+
+unlock_gpu:
+    rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+unlock_api:
+    rmapiLockRelease();
+done:
+    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+    osPutPidInfo(pidInfo);
+
+    /* Copy only a complete successful snapshot, with locks already released. */
+    if (status == NV_OK && operation == NV_GPREEMPT_QUERY)
+    {
+        status = os_memcpy_to_user(NvP64_VALUE(pApi->params), &channels,
+                                   sizeof(channels));
+        if (status == NV_OK)
+        {
+            pApi->hClient = selectedClient;
+            pApi->hObject = selectedObject;
+        }
+    }
+    return status;
+}
 
 #define NV_CTL_DEVICE_ONLY(nv)                 \
 {                                              \
@@ -421,6 +582,20 @@ NV_STATUS RmIoctl(
                 Nv04AllocWithAccessSecInfo(pApiAccess, secInfo);
             }
 
+            break;
+        }
+
+        case NV_ESC_RM_QUERY_GROUP:
+        {
+            NVOS54_PARAMETERS *pApi = data;
+            if (dataSize != sizeof(*pApi))
+            {
+                rmStatus = NV_ERR_INVALID_ARGUMENT;
+                goto done;
+            }
+            pApi->status = NV_ERR_INVALID_ARGUMENT;
+            NV_CTL_DEVICE_ONLY(nv);
+            pApi->status = RmGPreemptTransport(pApi);
             break;
         }
 

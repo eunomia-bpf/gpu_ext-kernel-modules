@@ -144,6 +144,8 @@ struct KernelChannelGroupApi {
     NvHandle hLegacykCtxShareSync;
     NvHandle hLegacykCtxShareAsync;
     NvHandle hVASpace;
+    /* GPreempt compatibility: creator identity, never an authorization token. */
+    NvU64 gpreemptCreatorThreadId;
 };
 
 
