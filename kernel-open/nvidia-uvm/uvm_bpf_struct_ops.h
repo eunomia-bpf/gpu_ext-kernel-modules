@@ -11,6 +11,32 @@ typedef struct uvm_bpf_prefetch_decision
     nv_gpu_prefetch_decision_t request;
 } uvm_bpf_prefetch_decision_t;
 
+enum uvm_bpf_prefetch_diagnostic_phase {
+    UVM_BPF_PREFETCH_DIAG_SELECTED = 1,
+    UVM_BPF_PREFETCH_DIAG_FINISHED = 2,
+};
+
+/* Driver-owned copies for a privileged, read-only tracing observer.
+ * Output fields are valid only at FINISHED. */
+struct uvm_bpf_prefetch_diagnostic_ctx {
+    NvS64 raw_action;
+    NvU64 requested_first;
+    NvU64 requested_outer;
+    NvU64 max_first;
+    NvU64 max_outer;
+    NvU64 output_first;
+    NvU64 output_outer;
+    NvU32 phase;
+    NvU32 request_attempted;
+    NvU32 request_conflict;
+    NvU32 initial_region_result;
+    NvU32 initial_effect;
+    NvU32 native_iterations;
+    NvU32 native_completed;
+};
+
+void uvm_bpf_prefetch_diagnostic(const struct uvm_bpf_prefetch_diagnostic_ctx *ctx);
+
 typedef struct uvm_bpf_pmm_decision_ctx
 {
     // All fields are driver-owned and read/write access from BPF is rejected.

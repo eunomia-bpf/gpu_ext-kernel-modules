@@ -342,6 +342,13 @@ void uvm_bpf_struct_ops_exit(void)
 	pr_info("UVM: bpf_struct_ops cleaned up\n");
 }
 
+/* Kbuild-instrumented observation only: no policy dispatch or state writes. */
+noinline void uvm_bpf_prefetch_diagnostic(const struct uvm_bpf_prefetch_diagnostic_ctx *ctx)
+{
+	if (ctx)
+		barrier();
+}
+
 /* Wrapper functions for calling BPF hooks */
 NvS64 uvm_bpf_call_gpu_page_prefetch(
 	uvm_page_index_t page_index,

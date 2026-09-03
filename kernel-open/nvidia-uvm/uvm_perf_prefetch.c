@@ -112,6 +112,7 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     enum nv_gpu_transition_result region_result;
     enum nv_gpu_prefetch_initial_effect initial_effect;
     NvS64 raw_action;
+    struct uvm_bpf_prefetch_diagnostic_ctx diagnostic = {0};
     const NvU64 type_outer = (NvU64)(uvm_page_index_t)~0U;
 
     raw_action = uvm_bpf_call_gpu_page_prefetch(page_index,
@@ -126,6 +127,18 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
                                                        &validated_region);
     initial_effect = nv_gpu_transition_prefetch_initial_effect(raw_action,
                                                                region_result);
+
+    diagnostic.raw_action = raw_action;
+    diagnostic.requested_first = initial_decision.first;
+    diagnostic.requested_outer = initial_decision.outer;
+    diagnostic.max_first = max_prefetch_region.first;
+    diagnostic.max_outer = max_prefetch_region.outer;
+    diagnostic.phase = UVM_BPF_PREFETCH_DIAG_SELECTED;
+    diagnostic.request_attempted = initial_decision.attempted;
+    diagnostic.request_conflict = initial_decision.conflict;
+    diagnostic.initial_region_result = region_result;
+    diagnostic.initial_effect = initial_effect;
+    uvm_bpf_prefetch_diagnostic(&diagnostic);
 
     if (initial_effect == NV_GPU_PREFETCH_INITIAL_BYPASS) {
         prefetch_region.first = (uvm_page_index_t)validated_region.first;
@@ -190,10 +203,12 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
             uvm_va_block_region_t subregion = uvm_perf_prefetch_bitmap_tree_iter_get_range(bitmap_tree, &iter);
             NvU16 subregion_pages = uvm_va_block_region_num_pages(subregion);
 
+            ++diagnostic.native_iterations;
             UVM_ASSERT(counter <= subregion_pages);
             if (counter * 100 > subregion_pages * g_uvm_perf_prefetch_threshold)
                 relative_region = subregion;
         }
+        diagnostic.native_completed = 1;
 
         if (relative_region.outer != 0) {
             region_result = nv_gpu_transition_translate_region(max_prefetch_region.first,
@@ -210,6 +225,11 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
             }
         }
     }
+
+    diagnostic.output_first = prefetch_region.first;
+    diagnostic.output_outer = prefetch_region.outer;
+    diagnostic.phase = UVM_BPF_PREFETCH_DIAG_FINISHED;
+    uvm_bpf_prefetch_diagnostic(&diagnostic);
 
     return prefetch_region;
 }
