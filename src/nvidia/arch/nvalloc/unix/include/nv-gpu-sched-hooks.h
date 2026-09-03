@@ -28,6 +28,7 @@
 
 #include "nvtypes.h"
 #include "nv-gpu-transition-validator.h"
+#include "nv-gpu-rpc-diagnostic.h"
 
 /*
  * ============================================================================
@@ -106,6 +107,8 @@ struct nv_gpu_token_request_ctx {
  */
 struct nv_gpu_task_destroy_ctx {
     NvU64 tsg_id;               /* TSG ID */
+    NvU32 runlist_id;           /* Appended: per-runlist grpID namespace */
+    NvU32 engine_type;          /* Appended: actual RM_ENGINE_TYPE */
 };
 
 /*
@@ -128,5 +131,7 @@ extern void nv_gpu_sched_token_request(struct nv_gpu_token_request_ctx *ctx);
 
 /* Called when a TSG is destroyed */
 extern void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx);
+
+extern void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_complete_ctx *ctx);
 
 #endif /* _NV_GPU_SCHED_HOOKS_H_ */

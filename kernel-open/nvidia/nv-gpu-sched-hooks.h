@@ -19,6 +19,7 @@
 
 #include <linux/types.h>
 #include "nv-gpu-transition-validator.h"
+#include "nv-gpu-rpc-diagnostic.h"
 
 /*
  * Context structures for hook functions
@@ -47,6 +48,8 @@ struct nv_gpu_token_request_ctx {
 /* Hook 4: task_destroy context - TSG destruction */
 struct nv_gpu_task_destroy_ctx {
     u64 tsg_id;               /* TSG ID */
+    u32 runlist_id;           /* grpID is allocated within a per-runlist CHID_MGR */
+    u32 engine_type;          /* RM_ENGINE_TYPE, not a CUDA engine ordinal */
 };
 
 /*
@@ -74,6 +77,8 @@ void nv_gpu_sched_token_request(struct nv_gpu_token_request_ctx *ctx);
 
 /* Hook 4: Called when a TSG is destroyed */
 void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx);
+
+void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_complete_ctx *ctx);
 
 /*
  * ============================================================================

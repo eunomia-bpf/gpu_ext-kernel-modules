@@ -29,6 +29,8 @@
 //******************************************************************************
 
 #include "os/os.h"
+#include "nv-gpu-sched-hooks.h"
+#include "ctrl/ctrla06c.h"
 #include "core/system.h"
 #include "core/locks.h"
 #include "gpu/gpu.h"
@@ -10392,6 +10394,24 @@ NV_STATUS rpcRmApiControl_GSP
     NvU32 resCtrlFlags = NVOS54_FLAGS_NONE;
     NvBool bPreSerialized = NV_FALSE;
     void *pOriginalParams = pParamStructPtr;
+    struct nv_gpu_gsp_control_complete_ctx observation = {0};
+    NvBool observeControl = cmd == NVA06C_CTRL_CMD_SET_TIMESLICE ||
+                            cmd == NVA06C_CTRL_CMD_SET_INTERLEAVE_LEVEL;
+
+    if (observeControl)
+    {
+        NvU32 expectedSize = cmd == NVA06C_CTRL_CMD_SET_TIMESLICE ? sizeof(NvU64) : sizeof(NvU32);
+        observation.hClient = hClient;
+        observation.hObject = hObject;
+        observation.command = cmd;
+        observation.input_size = paramsSize;
+        if (pParamStructPtr != NULL && paramsSize == expectedSize)
+        {
+            portMemCopy(&observation.input_value, sizeof(observation.input_value),
+                        pParamStructPtr, expectedSize);
+            observation.input_valid = NV_TRUE;
+        }
+    }
 
     if (!rmDeviceGpuLockIsOwner(pGpu->gpuInstance))
     {
@@ -10559,6 +10579,17 @@ NV_STATUS rpcRmApiControl_GSP
     else
     {
         status = _issueRpcAndWait(pGpu, pRpc);
+    }
+
+    /* Emit only after the real RPC wait, never for a cache hit or early reject.
+     * Capture status before existing error handling/deserialization changes it.
+     * The hook is observation-only and does not affect the return path. */
+    if (observeControl)
+    {
+        observation.wire_size = paramsSize;
+        nv_gpu_gsp_observe_status(&observation, status,
+            status == NV_OK ? rpc_params->status : ~(NvU32)0);
+        nv_gpu_sched_gsp_control_complete(&observation);
     }
 
     //

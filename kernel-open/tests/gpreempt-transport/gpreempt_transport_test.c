@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include "nv-gpreempt-transport.h"
+#include "../../../src/nvidia/arch/nvalloc/unix/include/nv-gpu-sched-hooks.h"
 
 static unsigned int assertions;
 #define EXPECT(x) do { ++assertions; if (!(x)) { \
@@ -94,12 +96,29 @@ static void test_unique_selection(void)
     EXPECT(matches == 2);
 }
 
+static void test_appended_identity_and_rpc_status(void)
+{
+    EXPECT(sizeof(struct nv_gpu_task_destroy_ctx) == 16);
+    EXPECT(offsetof(struct nv_gpu_task_destroy_ctx, tsg_id) == 0);
+    EXPECT(offsetof(struct nv_gpu_task_destroy_ctx, runlist_id) == 8);
+    EXPECT(offsetof(struct nv_gpu_task_destroy_ctx, engine_type) == 12);
+    EXPECT(sizeof(struct nv_gpu_gsp_control_complete_ctx) == 48);
+    struct nv_gpu_gsp_control_complete_ctx observation = {0};
+    nv_gpu_gsp_observe_status(&observation, 0, 0);
+    EXPECT(observation.transport_status == 0 && observation.gsp_status_valid && observation.gsp_status == 0);
+    nv_gpu_gsp_observe_status(&observation, 0, 31);
+    EXPECT(observation.transport_status == 0 && observation.gsp_status_valid && observation.gsp_status == 31);
+    nv_gpu_gsp_observe_status(&observation, 99, 0);
+    EXPECT(observation.transport_status == 99 && !observation.gsp_status_valid && observation.gsp_status == ~(NvU32)0);
+}
+
 int main(void)
 {
     test_query_envelope();
     test_narrow_control();
     test_owner_identity_and_bounds();
     test_unique_selection();
-    printf("gpreempt_transport: 4 cases, %u assertions passed (CPU only)\n", assertions);
+    test_appended_identity_and_rpc_status();
+    printf("gpreempt_transport: 5 cases, %u assertions passed (CPU only)\n", assertions);
     return 0;
 }

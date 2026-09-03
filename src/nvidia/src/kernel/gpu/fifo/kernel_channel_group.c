@@ -46,6 +46,8 @@ kchangrpDestruct_IMPL(KernelChannelGroup *pKernelChannelGroup)
     {
         struct nv_gpu_task_destroy_ctx ctx = {0};
         ctx.tsg_id = pKernelChannelGroup->grpID;
+        ctx.runlist_id = pKernelChannelGroup->runlistId;
+        ctx.engine_type = pKernelChannelGroup->engineType;
         nv_gpu_sched_task_destroy(&ctx);
     }
     return;

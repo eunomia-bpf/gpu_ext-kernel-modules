@@ -379,6 +379,15 @@ EXPORT_SYMBOL(nv_gpu_sched_struct_ops_exit);
  */
 #define NV_SCHED_HOOK_BARRIER() barrier()
 
+/* Kbuild-instrumented diagnostic attachment point. The core RM functions stay
+ * notrace; no address-based probing or relaxation of that restriction is used.
+ * This callback never dispatches a policy and cannot alter RPC return status. */
+noinline void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_complete_ctx *ctx)
+{
+    if (ctx)
+        NV_SCHED_HOOK_BARRIER();
+}
+
 /*
  * Hook 1: nv_gpu_sched_task_init
  *

@@ -61,3 +61,28 @@ creation/destruction; verify both timeslice controls' real GSP status and
 cleanup. Preserve full GPreempt's GDRCopy/two-block-kernel/hint behavior in
 the userspace port. Shadow GET/host fields alone are not hardware evidence.
 No installation, module load, or GPU run is part of this CPU-only port.
+
+## Runlist identity and diagnostic completion hook
+
+`grpID` is allocated by a per-runlist `CHID_MGR`: GR and CE groups may have
+the same numeric ID. The destroy context appends `runlist_id` and the actual
+RM `engine_type`, preserving `tsg_id` at offset zero. Consumers that retain
+TSG state must use `(runlist_id, tsg_id)` and appropriate engine scoping; a
+numeric TSG ID alone is not a unique GPU-wide identity. The CPU tests check
+the appended 16-byte layout without changing the existing first field.
+
+Core RM routines are built notrace. Instead of bypassing that restriction,
+the normal Kbuild-instrumented `nv_gpu_sched_gsp_control_complete` provides
+an observation-only attachment point. `rpcRmApiControl_GSP` calls it only
+after a real RPC wait for SET_TIMESLICE or SET_INTERLEAVE_LEVEL. Its 48-byte
+record preserves the original input value/size before serialization and
+records actual transport status and firmware response status. Firmware
+status is explicitly invalid if transport failed. Cache hits and pre-RPC
+rejections do not emit completion events. The hook neither dispatches a
+policy nor changes driver state or the existing return/error path.
+
+This record is a GSP completion status, not the final host-deserialization
+return or a measurement of physical scheduling quantum. Userspace must
+still check its control ioctl/RM status. CPU tests cover successful firmware
+status, firmware rejection, and failed transport without a valid response.
+An actual attachment and correlated two-context canary remain required.
