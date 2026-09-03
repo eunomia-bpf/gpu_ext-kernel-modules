@@ -69,17 +69,34 @@ static int nv_gpu_sched_ops__on_task_destroy(struct nv_gpu_task_destroy_ctx *ctx
     return 0;
 }
 
+static int nv_gpu_sched_ops__on_timeslice_control(struct nv_gpu_timeslice_control_ctx *ctx)
+{
+    return 0;
+}
+
 /* CFI stubs structure */
 static struct nv_gpu_sched_ops __bpf_ops_nv_gpu_sched_ops = {
     .on_task_init = nv_gpu_sched_ops__on_task_init,
     .on_bind = nv_gpu_sched_ops__on_bind,
     .on_task_destroy = nv_gpu_sched_ops__on_task_destroy,
+    .on_timeslice_control = nv_gpu_sched_ops__on_timeslice_control,
 };
 
 /*
  * kfunc definitions - kernel functions callable from BPF
  */
 __bpf_kfunc_start_defs();
+
+/* Non-sleeping decision only: the existing authorized RM call performs RPC. */
+__bpf_kfunc int bpf_nv_gpu_override_timeslice(struct nv_gpu_timeslice_control_ctx *ctx,
+                                            u64 timeslice_us)
+{
+    struct nv_gpu_timeslice_control_decision_ctx *decision;
+    if (!ctx)
+        return (int)NV_GPU_TRANSITION_REJECT_IDENTITY;
+    decision = container_of(ctx, struct nv_gpu_timeslice_control_decision_ctx, input);
+    return (int)nv_gpu_timeslice_control_record(decision, timeslice_us);
+}
 
 /*
  * bpf_nv_gpu_set_timeslice - Set timeslice for a TSG
@@ -151,6 +168,7 @@ __bpf_kfunc_end_defs();
 
 /* Define the BTF kfuncs ID set */
 BTF_KFUNCS_START(nv_gpu_sched_kfunc_ids_set)
+BTF_ID_FLAGS(func, bpf_nv_gpu_override_timeslice, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_nv_gpu_set_timeslice, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_nv_gpu_set_interleave, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_nv_gpu_reject_bind, KF_TRUSTED_ARGS)
@@ -386,6 +404,19 @@ noinline void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_
 {
     if (ctx)
         NV_SCHED_HOOK_BARRIER();
+}
+
+noinline void nv_gpu_sched_timeslice_control(struct nv_gpu_timeslice_control_ctx *ctx)
+{
+    struct nv_gpu_sched_ops *ops;
+    if (!ctx)
+        return;
+    rcu_read_lock();
+    ops = rcu_dereference(nv_gpu_sched_bpf_ops);
+    if (ops && ops->on_timeslice_control)
+        ops->on_timeslice_control(ctx);
+    rcu_read_unlock();
+    NV_SCHED_HOOK_BARRIER();
 }
 
 /*

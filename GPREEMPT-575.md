@@ -86,3 +86,34 @@ return or a measurement of physical scheduling quantum. Userspace must
 still check its control ioctl/RM status. CPU tests cover successful firmware
 status, firmware rejection, and failed transport without a valid response.
 An actual attachment and correlated two-context canary remain required.
+
+## Persistent timeslice-control policy
+
+The real completion canary found that CUDA subsequently submitted 2,048 us
+after successful BPF initialization. `on_timeslice_control` is an optional,
+appended scheduler callback inside the existing authorized and locked
+`kchangrpapiCtrlCmdSetTimeslice_IMPL` GSP branch, before its original RPC.
+Old policies omit this member and retain the original payload and path.
+
+Its read-only 40-byte context contains the actual RM client/object, grpID,
+runlist, engine, GPU instance, incoming timeslice and phase. A trusted-argument
+kfunc records a proposed timeslice; it does not sleep, call RM, write the
+context or change any object. Once the RCU callback returns, the driver checks
+the identity/phase snapshot, conflicting requests, hardware minimum and the
+bounded policy range 1–1,000,000 us. Invalid policy proposals return an error
+before RPC. Same-value repeated proposals are idempotent.
+
+Only incoming values in that same bounded domain are policy-eligible. Other
+values use the original native path unchanged: BPF cannot turn an out-of-range
+request into a valid one. This is not a claim to enumerate every possible
+firmware semantic rejection. Existing class, parameter, permission and object
+checks remain in place. With no proposal there is no validation-induced error
+or payload change. The existing physical RPC, returned status and update of
+host bookkeeping only after successful RPC remain unchanged; there is no new
+generic control escape or sleeping executor.
+
+CPU coverage checks the input layout, native 2,048-us no-op, LC/BE proposals,
+every identity field, stale phase, lower/upper bounds, minimum timeslice,
+repeat/conflict and preservation of invalid incoming values. This build-only
+checkpoint still requires a newly loaded module and real original/BPF canaries
+with the final GSP value checked before kernel execution.

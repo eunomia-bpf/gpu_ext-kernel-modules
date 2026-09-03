@@ -1479,6 +1479,39 @@ kchangrpapiCtrlCmdSetTimeslice_IMPL
         NvHandle hObject = RES_GET_HANDLE(pKernelChannelGroupApi);
         NVA06C_CTRL_TIMESLICE_PARAMS *pParams = (NVA06C_CTRL_TIMESLICE_PARAMS *)(pRmCtrlParams->pParams);
 
+        /* This boundary is inside the original authorized/locked RM control.
+         * Old/absent policies and inputs outside the bounded policy domain use
+         * the exact original payload, actuator and error propagation below. */
+        if (IS_GSP_CLIENT(pGpu) &&
+            nv_gpu_timeslice_control_eligible(pParams->timesliceUs,
+                kfifoRunlistGetMinTimeSlice_HAL(GPU_GET_KERNEL_FIFO(pGpu))))
+        {
+            struct nv_gpu_timeslice_control_decision_ctx decision = {0};
+            struct nv_gpu_timeslice_control_ctx expected = {
+                .tsg_id = pKernelChannelGroup->grpID,
+                .requested_timeslice_us = pParams->timesliceUs,
+                .engine_type = pKernelChannelGroup->engineType,
+                .runlist_id = pKernelChannelGroup->runlistId,
+                .hclient = hClient,
+                .htsg = hObject,
+                .gpu_instance = pGpu->gpuInstance,
+                .phase = NV_GPU_TIMESLICE_CONTROL_PHASE,
+            };
+            NvU64 effective;
+            enum nv_gpu_transition_result result;
+            decision.input = expected;
+            nv_gpu_sched_timeslice_control(&decision.input);
+            if (decision.request.attempted)
+            {
+                result = nv_gpu_timeslice_control_validate(&expected, &decision.input,
+                    kfifoRunlistGetMinTimeSlice_HAL(GPU_GET_KERNEL_FIFO(pGpu)),
+                    &decision.request, &effective);
+                if (result != NV_GPU_TRANSITION_APPLY)
+                    return NV_ERR_INVALID_ARGUMENT;
+                pParams->timesliceUs = effective;
+            }
+        }
+
         NV_RM_RPC_CONTROL(pGpu,
                           hClient,
                           hObject,

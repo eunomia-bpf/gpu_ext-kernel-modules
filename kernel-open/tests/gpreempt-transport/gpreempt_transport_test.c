@@ -112,6 +112,62 @@ static void test_appended_identity_and_rpc_status(void)
     EXPECT(observation.transport_status == 99 && !observation.gsp_status_valid && observation.gsp_status == ~(NvU32)0);
 }
 
+static void test_timeslice_control_validation(void)
+{
+    struct nv_gpu_timeslice_control_decision_ctx decision = {0};
+    struct nv_gpu_timeslice_control_ctx expected = {
+        .tsg_id = 7, .requested_timeslice_us = 2048, .engine_type = 1,
+        .runlist_id = 2, .hclient = 17, .htsg = 19, .gpu_instance = 0,
+        .phase = NV_GPU_TIMESLICE_CONTROL_PHASE,
+    };
+    NvU64 effective = 0;
+    EXPECT(sizeof(expected) == 40 && offsetof(struct nv_gpu_timeslice_control_ctx, phase) == 36);
+    decision.input = expected;
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_NOOP_DEFAULT);
+    EXPECT(effective == 2048); // Old/absent callback retains the exact native value.
+    EXPECT(nv_gpu_timeslice_control_record(&decision, 1) == NV_GPU_TRANSITION_APPLY);
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_APPLY && effective == 1);
+    EXPECT(nv_gpu_timeslice_control_record(&decision, 1) == NV_GPU_TRANSITION_NOOP_REPEAT);
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_APPLY && effective == 1);
+    EXPECT(nv_gpu_timeslice_control_record(&decision, 1000000) == NV_GPU_TRANSITION_NOOP_CONFLICT);
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_NOOP_CONFLICT && effective == 2048);
+    decision.request = (nv_gpu_transition_u64_request_t){0};
+    EXPECT(nv_gpu_timeslice_control_record(&decision, 1000000) == NV_GPU_TRANSITION_APPLY);
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_APPLY && effective == 1000000);
+    ++decision.input.runlist_id;
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_REJECT_IDENTITY && effective == 2048);
+    decision.input = expected; ++decision.input.phase;
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_NOOP_STALE && effective == 2048);
+    decision.input = expected;
+    #define REJECT_CHANGED_IDENTITY(field) do { \
+        ++decision.input.field; \
+        EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_REJECT_IDENTITY && effective == 2048); \
+        decision.input = expected; \
+    } while (0)
+    REJECT_CHANGED_IDENTITY(tsg_id);
+    REJECT_CHANGED_IDENTITY(engine_type);
+    REJECT_CHANGED_IDENTITY(hclient);
+    REJECT_CHANGED_IDENTITY(htsg);
+    REJECT_CHANGED_IDENTITY(gpu_instance);
+    REJECT_CHANGED_IDENTITY(requested_timeslice_us);
+    #undef REJECT_CHANGED_IDENTITY
+    for (NvU64 invalid = 0; invalid <= 1000001; invalid += 1000001) {
+        decision.request = (nv_gpu_transition_u64_request_t){0};
+        EXPECT(nv_gpu_timeslice_control_record(&decision, invalid) == NV_GPU_TRANSITION_REJECT_RANGE);
+        EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_REJECT_RANGE && effective == 2048);
+    }
+    EXPECT(!nv_gpu_timeslice_control_eligible(0, 0));
+    EXPECT(!nv_gpu_timeslice_control_eligible(1000001, 0));
+    EXPECT(!nv_gpu_timeslice_control_eligible(~(NvU64)0, 0));
+    EXPECT(!nv_gpu_timeslice_control_eligible(1, 2));
+    EXPECT(nv_gpu_timeslice_control_eligible(1, 0) && nv_gpu_timeslice_control_eligible(1000000, 0));
+    decision.request = (nv_gpu_transition_u64_request_t){0};
+    nv_gpu_timeslice_control_record(&decision, 1);
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 2, &decision.request, &effective) == NV_GPU_TRANSITION_REJECT_RANGE && effective == 2048);
+    expected.requested_timeslice_us = 0; decision.input = expected;
+    EXPECT(nv_gpu_timeslice_control_validate(&expected, &decision.input, 0, &decision.request, &effective) == NV_GPU_TRANSITION_REJECT_RANGE && effective == 0);
+}
+
 int main(void)
 {
     test_query_envelope();
@@ -119,6 +175,7 @@ int main(void)
     test_owner_identity_and_bounds();
     test_unique_selection();
     test_appended_identity_and_rpc_status();
-    printf("gpreempt_transport: 5 cases, %u assertions passed (CPU only)\n", assertions);
+    test_timeslice_control_validation();
+    printf("gpreempt_transport: 6 cases, %u assertions passed (CPU only)\n", assertions);
     return 0;
 }
