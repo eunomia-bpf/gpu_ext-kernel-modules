@@ -257,4 +257,34 @@ typedef struct NV2080_CTRL_CMD_TIMER_SET_GR_TICK_FREQ_PARAMS {
     NvBool bSetMaxFreq;
 } NV2080_CTRL_CMD_TIMER_SET_GR_TICK_FREQ_PARAMS;
 
+/*
+ * NV2080_CTRL_CMD_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1
+ *
+ * This command returns the two CPU timestamps selected by the PLATFORM_API
+ * zipper sampler together with the GPU PTIMER value read between them. The
+ * CPU timestamps use the platform performance counter; on Linux open kernel
+ * modules this is CLOCK_MONOTONIC_RAW in nanoseconds. The GPU timestamp is the
+ * GPU global timer in nanoseconds with 32-nanosecond resolution.
+ *
+ *   cpuBeforeNs
+ *     CPU timestamp immediately before the selected GPU timer read.
+ *   gpuTimeNs
+ *     GPU PTIMER value read between cpuBeforeNs and cpuAfterNs.
+ *   cpuAfterNs
+ *     CPU timestamp immediately after the selected GPU timer read.
+ *
+ * Possible status values returned are:
+ *   NV_OK
+ *   NV_ERR_INVALID_LOCK_STATE
+ */
+#define NV2080_CTRL_CMD_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1 (0x20800408)
+
+#define NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS_MESSAGE_ID (0x8U)
+
+typedef struct NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS {
+    NV_DECLARE_ALIGNED(NvU64 cpuBeforeNs, 8);
+    NV_DECLARE_ALIGNED(NvU64 gpuTimeNs, 8);
+    NV_DECLARE_ALIGNED(NvU64 cpuAfterNs, 8);
+} NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS;
+
 /* _ctrl2080tmr_h_ */

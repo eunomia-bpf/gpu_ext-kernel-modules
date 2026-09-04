@@ -462,6 +462,69 @@ subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationInfo_IMPL
 }
 
 /*!
+ * @brief Returns the PLATFORM_API zipper endpoints and the enclosed GPU time.
+ *
+ * @param[in]  pSubdevice
+ * @param[out] pParams
+ *
+ * @return NV_OK                     Success
+ * @return NV_ERR_INVALID_LOCK_STATE Required locks are not held
+ */
+NV_STATUS
+subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_IMPL
+(
+    Subdevice *pSubdevice,
+    NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS *pParams
+)
+{
+    OBJGPU *pGpu = GPU_RES_GET_GPU(pSubdevice);
+    OBJTMR *pTmr = GPU_GET_TIMER(pGpu);
+    const NvU32 numTimerSamples = 3;
+    NvU32 gpuTimeLo[3];
+    NvU64 cpuTime[4];
+    NvU64 min;
+    NvU32 closestPairBeginIndex;
+    NvU32 gpuTimeHiOld;
+    NvU32 gpuTimeHiNew;
+    NvU32 i;
+
+    NV_ASSERT_OR_RETURN(rmapiLockIsOwner() && rmGpuLockIsOwner(), NV_ERR_INVALID_LOCK_STATE);
+
+    gpuTimeHiNew = tmrReadTimeHiReg_HAL(pGpu, pTmr, NULL);
+
+    do
+    {
+        gpuTimeHiOld = gpuTimeHiNew;
+        for (i = 0; i < numTimerSamples; i++)
+        {
+            osGetPerformanceCounter(&cpuTime[i]);
+            gpuTimeLo[i] = tmrReadTimeLoReg_HAL(pGpu, pTmr, NULL);
+        }
+
+        osGetPerformanceCounter(&cpuTime[i]);
+        gpuTimeHiNew = tmrReadTimeHiReg_HAL(pGpu, pTmr, NULL);
+    } while (gpuTimeHiNew != gpuTimeHiOld);
+
+    min = cpuTime[1] - cpuTime[0];
+    closestPairBeginIndex = 0;
+    for (i = 1; i < numTimerSamples; i++)
+    {
+        if ((cpuTime[i + 1] - cpuTime[i]) < min)
+        {
+            closestPairBeginIndex = i;
+            min = cpuTime[i + 1] - cpuTime[i];
+        }
+    }
+
+    pParams->cpuBeforeNs = cpuTime[closestPairBeginIndex];
+    pParams->gpuTimeNs = ((((NvU64)gpuTimeHiNew) << 32) |
+                          gpuTimeLo[closestPairBeginIndex]);
+    pParams->cpuAfterNs = cpuTime[closestPairBeginIndex + 1];
+
+    return NV_OK;
+}
+
+/*!
  * @brief Set the frequency to update GR time stamp to default or max.
  *
  * The GR tick frequency will be restored to default
@@ -519,4 +582,3 @@ subdeviceCtrlCmdTimerSetGrTickFreq_IMPL
     }
     return status;
 }
-

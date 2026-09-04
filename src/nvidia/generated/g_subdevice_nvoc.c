@@ -1790,6 +1790,21 @@ static const struct NVOC_EXPORTED_METHOD_DEF __nvoc_exported_method_def_Subdevic
         /*func=*/       "subdeviceCtrlCmdTimerSetGrTickFreq"
 #endif
     },
+    {
+#if NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x108u)
+        /*pFunc=*/      (void (*)(void)) NULL,
+#else
+        /*pFunc=*/      (void (*)(void)) subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_IMPL,
+#endif // NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x108u)
+        /*flags=*/      0x108u,
+        /*accessRight=*/0x0u,
+        /*methodId=*/   0x20800408u,
+        /*paramSize=*/  sizeof(NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS),
+        /*pClassInfo=*/ &(__nvoc_class_def_Subdevice.classInfo),
+#if NV_PRINTF_STRINGS_ALLOWED
+        /*func=*/       "subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1"
+#endif
+    },
     {               /*  [110] */
 #if NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x8u)
         /*pFunc=*/      (void (*)(void)) NULL,
@@ -9841,7 +9856,7 @@ NV_STATUS __nvoc_up_thunk_Notifier_subdeviceGetOrAllocNotifShare(struct Subdevic
 
 const struct NVOC_EXPORT_INFO __nvoc_export_info__Subdevice = 
 {
-    /*numEntries=*/     626,
+    /*numEntries=*/     627,
     /*pExportEntries=*/ __nvoc_exported_method_def_Subdevice
 };
 
@@ -11963,6 +11978,11 @@ static void __nvoc_init_funcTable_Subdevice_2(Subdevice *pThis, RmHalspecOwner *
     pThis->__subdeviceCtrlCmdTimerSetGrTickFreq__ = &subdeviceCtrlCmdTimerSetGrTickFreq_IMPL;
 #endif
 
+    // subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1 -- exported (id=0x20800408)
+#if !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x108u)
+    pThis->__subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1__ = &subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_IMPL;
+#endif
+
     // subdeviceCtrlCmdRcReadVirtualMem -- exported (id=0x20802204)
 #if !NVOC_EXPORTED_METHOD_DISABLED_BY_FLAG(0x0u)
     pThis->__subdeviceCtrlCmdRcReadVirtualMem__ = &subdeviceCtrlCmdRcReadVirtualMem_IMPL;
@@ -13281,10 +13301,10 @@ static void __nvoc_init_funcTable_Subdevice_3(Subdevice *pThis, RmHalspecOwner *
 } // End __nvoc_init_funcTable_Subdevice_3 with approximately 149 basic block(s).
 
 
-// Initialize vtable(s) for 656 virtual method(s).
+// Initialize vtable(s) for 657 virtual method(s).
 void __nvoc_init_funcTable_Subdevice(Subdevice *pThis, RmHalspecOwner *pRmhalspecowner) {
 
-    // Initialize vtable(s) with 626 per-object function pointer(s).
+    // Initialize vtable(s) with 627 per-object function pointer(s).
     // To reduce stack pressure with some unoptimized builds, the logic is distributed among 3 functions.
     __nvoc_init_funcTable_Subdevice_1(pThis, pRmhalspecowner);
     __nvoc_init_funcTable_Subdevice_2(pThis, pRmhalspecowner);
@@ -13394,4 +13414,3 @@ NV_STATUS __nvoc_objCreateDynamic_Subdevice(Subdevice **ppThis, Dynamic *pParent
 
     return status;
 }
-

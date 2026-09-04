@@ -155,7 +155,7 @@ struct Subdevice {
     struct Notifier *__nvoc_pbase_Notifier;    // notify super
     struct Subdevice *__nvoc_pbase_Subdevice;    // subdevice
 
-    // Vtable with 626 per-object function pointers
+    // Vtable with 627 per-object function pointers
     NV_STATUS (*__subdeviceCtrlCmdBiosGetInfoV2__)(struct Subdevice * /*this*/, NV2080_CTRL_BIOS_GET_INFO_V2_PARAMS *);  // halified (2 hals) exported (id=0x20800810) body
     NV_STATUS (*__subdeviceCtrlCmdBiosGetNbsiV2__)(struct Subdevice * /*this*/, NV2080_CTRL_BIOS_GET_NBSI_V2_PARAMS *);  // exported (id=0x2080080e)
     NV_STATUS (*__subdeviceCtrlCmdBiosGetSKUInfo__)(struct Subdevice * /*this*/, NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS *);  // halified (2 hals) exported (id=0x20800808)
@@ -533,6 +533,7 @@ struct Subdevice {
     NV_STATUS (*__subdeviceCtrlCmdTimerGetRegisterOffset__)(struct Subdevice * /*this*/, NV2080_CTRL_TIMER_GET_REGISTER_OFFSET_PARAMS *);  // exported (id=0x20800404)
     NV_STATUS (*__subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationInfo__)(struct Subdevice * /*this*/, NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_INFO_PARAMS *);  // exported (id=0x20800406)
     NV_STATUS (*__subdeviceCtrlCmdTimerSetGrTickFreq__)(struct Subdevice * /*this*/, NV2080_CTRL_CMD_TIMER_SET_GR_TICK_FREQ_PARAMS *);  // exported (id=0x20800407)
+    NV_STATUS (*__subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1__)(struct Subdevice * /*this*/, NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS *);  // exported (id=0x20800408)
     NV_STATUS (*__subdeviceCtrlCmdRcReadVirtualMem__)(struct Subdevice * /*this*/, NV2080_CTRL_RC_READ_VIRTUAL_MEM_PARAMS *);  // exported (id=0x20802204)
     NV_STATUS (*__subdeviceCtrlCmdRcGetErrorCount__)(struct Subdevice * /*this*/, NV2080_CTRL_RC_GET_ERROR_COUNT_PARAMS *);  // exported (id=0x20802205)
     NV_STATUS (*__subdeviceCtrlCmdRcGetErrorV2__)(struct Subdevice * /*this*/, NV2080_CTRL_RC_GET_ERROR_V2_PARAMS *);  // exported (id=0x20802213)
@@ -1687,6 +1688,8 @@ NV_STATUS __nvoc_objCreate_Subdevice(Subdevice**, Dynamic*, NvU32, struct CALL_C
 #define subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationInfo(pSubdevice, pParams) subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationInfo_DISPATCH(pSubdevice, pParams)
 #define subdeviceCtrlCmdTimerSetGrTickFreq_FNPTR(pSubdevice) pSubdevice->__subdeviceCtrlCmdTimerSetGrTickFreq__
 #define subdeviceCtrlCmdTimerSetGrTickFreq(pSubdevice, pParams) subdeviceCtrlCmdTimerSetGrTickFreq_DISPATCH(pSubdevice, pParams)
+#define subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_FNPTR(pSubdevice) pSubdevice->__subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1__
+#define subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1(pSubdevice, pParams) subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_DISPATCH(pSubdevice, pParams)
 #define subdeviceCtrlCmdRcReadVirtualMem_FNPTR(pSubdevice) pSubdevice->__subdeviceCtrlCmdRcReadVirtualMem__
 #define subdeviceCtrlCmdRcReadVirtualMem(pSubdevice, pReadVirtMemParam) subdeviceCtrlCmdRcReadVirtualMem_DISPATCH(pSubdevice, pReadVirtMemParam)
 #define subdeviceCtrlCmdRcGetErrorCount_FNPTR(pSubdevice) pSubdevice->__subdeviceCtrlCmdRcGetErrorCount__
@@ -3774,6 +3777,10 @@ static inline NV_STATUS subdeviceCtrlCmdTimerSetGrTickFreq_DISPATCH(struct Subde
     return pSubdevice->__subdeviceCtrlCmdTimerSetGrTickFreq__(pSubdevice, pParams);
 }
 
+static inline NV_STATUS subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_DISPATCH(struct Subdevice *pSubdevice, NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS *pParams) {
+    return pSubdevice->__subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1__(pSubdevice, pParams);
+}
+
 static inline NV_STATUS subdeviceCtrlCmdRcReadVirtualMem_DISPATCH(struct Subdevice *pSubdevice, NV2080_CTRL_RC_READ_VIRTUAL_MEM_PARAMS *pReadVirtMemParam) {
     return pSubdevice->__subdeviceCtrlCmdRcReadVirtualMem__(pSubdevice, pReadVirtMemParam);
 }
@@ -5811,6 +5818,8 @@ NV_STATUS subdeviceCtrlCmdTimerGetRegisterOffset_IMPL(struct Subdevice *pSubdevi
 NV_STATUS subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationInfo_IMPL(struct Subdevice *pSubdevice, NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_INFO_PARAMS *pParams);
 
 NV_STATUS subdeviceCtrlCmdTimerSetGrTickFreq_IMPL(struct Subdevice *pSubdevice, NV2080_CTRL_CMD_TIMER_SET_GR_TICK_FREQ_PARAMS *pParams);
+
+NV_STATUS subdeviceCtrlCmdTimerGetGpuCpuTimeCorrelationEndpointsV1_IMPL(struct Subdevice *pSubdevice, NV2080_CTRL_TIMER_GET_GPU_CPU_TIME_CORRELATION_ENDPOINTS_V1_PARAMS *pParams);
 
 NV_STATUS subdeviceCtrlCmdRcReadVirtualMem_IMPL(struct Subdevice *pSubdevice, NV2080_CTRL_RC_READ_VIRTUAL_MEM_PARAMS *pReadVirtMemParam);
 
