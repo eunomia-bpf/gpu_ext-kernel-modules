@@ -406,6 +406,14 @@ noinline void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_
         NV_SCHED_HOOK_BARRIER();
 }
 
+/* Read-only constructor observation. This deliberately has no return channel,
+ * struct_ops dispatch, or state mutation. */
+noinline void nv_gpu_sched_init_diagnostic(const struct nv_gpu_sched_init_diagnostic_ctx *ctx)
+{
+    if (ctx)
+        NV_SCHED_HOOK_BARRIER();
+}
+
 noinline void nv_gpu_sched_timeslice_control(struct nv_gpu_timeslice_control_ctx *ctx)
 {
     struct nv_gpu_sched_ops *ops;

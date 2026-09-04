@@ -103,6 +103,13 @@ kchangrpapiConstruct_IMPL
     KernelChannelGroup                     *pKernelChannelGroup = NULL;
     NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS *pAllocParams        = NULL;
     RM_ENGINE_TYPE                          rmEngineType;
+    struct nv_gpu_sched_init_diagnostic_ctx schedDiagnostic = {
+        .abi_version = NV_GPU_SCHED_INIT_DIAGNOSTIC_ABI_VERSION,
+        .abi_size = sizeof(struct nv_gpu_sched_init_diagnostic_ctx),
+        .timeslice_native_status = NV_GPU_SCHED_INIT_DIAGNOSTIC_STATUS_NOT_OBSERVED,
+        .interleave_native_status = NV_GPU_SCHED_INIT_DIAGNOSTIC_STATUS_NOT_OBSERVED,
+    };
+    NvBool                                  bSchedDiagnosticActive = NV_FALSE;
 
 
     NV_PRINTF(LEVEL_INFO,
@@ -329,6 +336,7 @@ kchangrpapiConstruct_IMPL
     // eBPF task-init policy: native defaults are stable before observation.
     {
         NvU32 subdevInst = gpumgrGetSubDeviceInstanceFromGpu(pGpu);
+        NvU64 minimumTimeslice = kfifoRunlistGetMinTimeSlice_HAL(pKernelFifo);
         struct nv_gpu_task_init_decision_ctx decision = {0};
         nv_gpu_scheduler_snapshot_t expected = {
             .tsg_id = pKernelChannelGroup->grpID,
@@ -344,6 +352,19 @@ kchangrpapiConstruct_IMPL
         decision.input.default_interleave = pKernelChannelGroup->pInterleaveLevel[subdevInst];
         decision.input.runlist_id = expected.runlist_id;
 
+        schedDiagnostic.h_client = pParams->hClient;
+        schedDiagnostic.h_resource = pParams->hResource;
+        schedDiagnostic.gpu_instance = pGpu->gpuInstance;
+        schedDiagnostic.subdevice_instance = subdevInst;
+        schedDiagnostic.group_id = pKernelChannelGroup->grpID;
+        schedDiagnostic.runlist_id = pKernelChannelGroup->runlistId;
+        schedDiagnostic.engine_type = pKernelChannelGroup->engineType;
+        schedDiagnostic.constructor_epoch = pKernelChannelGroup->tsgUniqueId;
+        schedDiagnostic.default_timeslice = pKernelChannelGroup->timesliceUs;
+        schedDiagnostic.minimum_timeslice = minimumTimeslice;
+        schedDiagnostic.default_interleave =
+            pKernelChannelGroup->pInterleaveLevel[subdevInst];
+
         nv_gpu_sched_task_init(&decision.input);
 
         observed.tsg_id = pKernelChannelGroup->grpID;
@@ -354,31 +375,53 @@ kchangrpapiConstruct_IMPL
             &observed,
             pKernelChannelGroup->timesliceUs,
             pKernelChannelGroup->pInterleaveLevel[subdevInst],
-            kfifoRunlistGetMinTimeSlice_HAL(pKernelFifo),
+            minimumTimeslice,
             &decision.timeslice_request,
             &decision.interleave_request);
 
+        schedDiagnostic.timeslice_attempted = decision.timeslice_request.attempted;
+        schedDiagnostic.timeslice_conflict = decision.timeslice_request.conflict;
+        schedDiagnostic.timeslice_request_value = decision.timeslice_request.value;
+        schedDiagnostic.interleave_attempted = decision.interleave_request.attempted;
+        schedDiagnostic.interleave_conflict = decision.interleave_request.conflict;
+        schedDiagnostic.interleave_request_value = decision.interleave_request.value;
+        schedDiagnostic.timeslice_validation_result = validation.timeslice_result;
+        schedDiagnostic.interleave_validation_result = validation.interleave_result;
+        schedDiagnostic.effective_timeslice = validation.timeslice;
+        schedDiagnostic.effective_interleave = validation.interleave;
+        schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_VALIDATED;
+        schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_NONE;
+        bSchedDiagnosticActive = NV_TRUE;
+        nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+
         if (_kchangrpapiPolicyValueApplies(validation.timeslice_result))
         {
-            NV_ASSERT_OK_OR_GOTO(
-                rmStatus,
-                kfifoChannelGroupSetTimeslice(pGpu,
-                                              pKernelFifo,
-                                              pKernelChannelGroup,
-                                              validation.timeslice,
-                                              NV_TRUE),
-                failed);
+            rmStatus = kfifoChannelGroupSetTimeslice(pGpu,
+                                                     pKernelFifo,
+                                                     pKernelChannelGroup,
+                                                     validation.timeslice,
+                                                     NV_TRUE);
+            schedDiagnostic.timeslice_native_status = rmStatus;
+            schedDiagnostic.timeslice_post_value = pKernelChannelGroup->timesliceUs;
+            schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_NATIVE_RETURN;
+            schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_TIMESLICE;
+            nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+            NV_ASSERT_OK_OR_GOTO(rmStatus, rmStatus, failed);
             bPolicyTimeslice = NV_TRUE;
         }
 
         if (_kchangrpapiPolicyValueApplies(validation.interleave_result))
         {
-            NV_ASSERT_OK_OR_GOTO(
-                rmStatus,
-                kchangrpSetInterleaveLevel(pGpu,
-                                           pKernelChannelGroup,
-                                           validation.interleave),
-                failed);
+            rmStatus = kchangrpSetInterleaveLevel(pGpu,
+                                                  pKernelChannelGroup,
+                                                  validation.interleave);
+            schedDiagnostic.interleave_native_status = rmStatus;
+            schedDiagnostic.interleave_post_value =
+                pKernelChannelGroup->pInterleaveLevel[subdevInst];
+            schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_NATIVE_RETURN;
+            schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_INTERLEAVE;
+            nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+            NV_ASSERT_OK_OR_GOTO(rmStatus, rmStatus, failed);
             bPolicyInterleave = NV_TRUE;
         }
     }
@@ -641,6 +684,28 @@ kchangrpapiConstruct_IMPL
     }
 
 failed:
+    if (bSchedDiagnosticActive)
+    {
+        NvU32 subdevInst = schedDiagnostic.subdevice_instance;
+
+        schedDiagnostic.constructor_status = rmStatus;
+        if (pKernelChannelGroup != NULL)
+        {
+            schedDiagnostic.final_timeslice = pKernelChannelGroup->timesliceUs;
+            schedDiagnostic.final_interleave =
+                pKernelChannelGroup->pInterleaveLevel[subdevInst];
+            schedDiagnostic.final_snapshot_valid = NV_TRUE;
+        }
+
+        if (rmStatus != NV_OK)
+        {
+            schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_CONSTRUCTOR_RETURN;
+            schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_NONE;
+            nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+            bSchedDiagnosticActive = NV_FALSE;
+        }
+    }
+
     if (rmStatus != NV_OK)
     {
         // A failed constructor does not enter the normal resource-server
@@ -695,13 +760,31 @@ done:
         if (rmStatus != NV_OK)
         {
             // Acquire the lock again for the cleanup path
-            NV_ASSERT_OK_OR_RETURN(rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_FIFO));
+            NV_STATUS lockStatus =
+                rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_FIFO);
+            if ((lockStatus != NV_OK) && bSchedDiagnosticActive)
+            {
+                schedDiagnostic.constructor_status = lockStatus;
+                schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_CONSTRUCTOR_RETURN;
+                schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_NONE;
+                nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+                bSchedDiagnosticActive = NV_FALSE;
+            }
+            NV_ASSERT_OK_OR_RETURN(lockStatus);
             bLockAcquired = NV_TRUE;
             goto failed;
         }
     }
 
     portMemFree(bufInfoList);
+
+    if (bSchedDiagnosticActive)
+    {
+        schedDiagnostic.constructor_status = rmStatus;
+        schedDiagnostic.phase = NV_GPU_SCHED_INIT_DIAGNOSTIC_CONSTRUCTOR_RETURN;
+        schedDiagnostic.field = NV_GPU_SCHED_INIT_DIAGNOSTIC_FIELD_NONE;
+        nv_gpu_sched_init_diagnostic(&schedDiagnostic);
+    }
 
     return rmStatus;
 }

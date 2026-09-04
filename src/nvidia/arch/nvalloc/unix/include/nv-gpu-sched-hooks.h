@@ -29,6 +29,7 @@
 #include "nvtypes.h"
 #include "nv-gpu-transition-validator.h"
 #include "nv-gpu-rpc-diagnostic.h"
+#include "nv-gpu-sched-init-diagnostic.h"
 #include "nv-gpu-timeslice-control.h"
 
 /*
@@ -134,6 +135,7 @@ extern void nv_gpu_sched_token_request(struct nv_gpu_token_request_ctx *ctx);
 extern void nv_gpu_sched_task_destroy(struct nv_gpu_task_destroy_ctx *ctx);
 
 extern void nv_gpu_sched_gsp_control_complete(const struct nv_gpu_gsp_control_complete_ctx *ctx);
+extern void nv_gpu_sched_init_diagnostic(const struct nv_gpu_sched_init_diagnostic_ctx *ctx);
 extern void nv_gpu_sched_timeslice_control(struct nv_gpu_timeslice_control_ctx *ctx);
 
 #endif /* _NV_GPU_SCHED_HOOKS_H_ */
