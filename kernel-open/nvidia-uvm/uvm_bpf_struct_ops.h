@@ -5,6 +5,7 @@
 #include "uvm_perf_prefetch.h"
 #include "uvm_pmm_gpu.h"
 #include "nv-gpu-transition-validator.h"
+#include "uvm_stale_state_v1.h"
 
 typedef struct uvm_bpf_prefetch_decision
 {
@@ -71,6 +72,9 @@ NvS64 uvm_bpf_call_gpu_page_prefetch_iter(
     uvm_va_block_region_t *current_region,
     unsigned int counter,
     nv_gpu_prefetch_decision_t *decision);
+
+NvS64 uvm_bpf_call_gpu_stale_state_v1(
+    uvm_stale_state_v1_decision_ctx_t *decision_ctx);
 
 /* PMM eviction policy hook wrapper functions */
 void uvm_bpf_call_gpu_block_activate(

@@ -113,12 +113,23 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     enum nv_gpu_prefetch_initial_effect initial_effect;
     NvS64 raw_action;
     struct uvm_bpf_prefetch_diagnostic_ctx diagnostic = {0};
+    uvm_stale_state_v1_decision_ctx_t stale_decision_ctx = {0};
+    struct uvm_stale_state_v1_diagnostic stale_diagnostic = {0};
+    bool stale_state_active;
     const NvU64 type_outer = (NvU64)(uvm_page_index_t)~0U;
 
-    raw_action = uvm_bpf_call_gpu_page_prefetch(page_index,
-                                                bitmap_tree,
-                                                &max_prefetch_region,
-                                                &initial_decision);
+    stale_state_active =
+        uvm_stale_state_v1_begin(page_index,
+                                 &max_prefetch_region,
+                                 &stale_decision_ctx,
+                                 &stale_diagnostic,
+                                 &raw_action,
+                                 &initial_decision);
+    if (!stale_state_active)
+        raw_action = uvm_bpf_call_gpu_page_prefetch(page_index,
+                                                    bitmap_tree,
+                                                    &max_prefetch_region,
+                                                    &initial_decision);
     region_result = nv_gpu_transition_validate_region(&initial_decision,
                                                        max_prefetch_region.first,
                                                        max_prefetch_region.outer,
@@ -127,6 +138,10 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
                                                        &validated_region);
     initial_effect = nv_gpu_transition_prefetch_initial_effect(raw_action,
                                                                region_result);
+    if (stale_state_active)
+        uvm_stale_state_v1_selected(&stale_diagnostic,
+                                    region_result,
+                                    initial_effect);
 
     diagnostic.raw_action = raw_action;
     diagnostic.requested_first = initial_decision.first;
@@ -230,6 +245,8 @@ static uvm_va_block_region_t compute_prefetch_region(uvm_page_index_t page_index
     diagnostic.output_outer = prefetch_region.outer;
     diagnostic.phase = UVM_BPF_PREFETCH_DIAG_FINISHED;
     uvm_bpf_prefetch_diagnostic(&diagnostic);
+    if (stale_state_active)
+        uvm_stale_state_v1_finished(&stale_diagnostic, &prefetch_region);
 
     return prefetch_region;
 }
